@@ -1,0 +1,1414 @@
+"use strict";
+/* ============ utilities ============ */
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = n => String(n).padStart(2, '0');
+const iso = d => { const x = new Date(d); return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate()) };
+const todayISO = () => iso(new Date());
+const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d) };
+const fmtD = s => s ? new Date(s + 'T00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+const fmtLong = s => new Date(s + 'T00:00').toLocaleDateString('en-PH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+const fmtDT = t => new Date(t).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const dayDiff = (a, b) => Math.round((new Date(b + 'T00:00') - new Date(a + 'T00:00')) / 864e5);
+const overlap = (a1, a2, b1, b2) => a1 <= b2 && b1 <= a2;
+const mask = n => String(n).length > 4 ? '•••• ' + String(n).slice(-4) : n;
+const uid = () => Math.random().toString(36).slice(2, 9);
+const rangeTxt = r => r.start === r.end ? fmtD(r.start) : fmtD(r.start) + ' to ' + fmtD(r.end);
+const last4 = s => String(s).replace(/\D/g, '').slice(-4);
+
+/* ============ constants ============ */
+const ROLE_LABEL = { requester: 'Public', secretary: 'Private Secretary', gso: 'General Services Office', admin: 'Admin (Mayor’s Office)' };
+const STATUS = {
+  submitted: ['Pending GSO review', 'warn'], id_issue: ['ID needs resubmission', 'bad'], for_approval: ['Awaiting Secretary approval', 'info'],
+  approved: ['Approved (official)', 'ok'], released: ['Released', 'accent'], returned: ['Returned', 'mute'],
+  rejected: ['Denied', 'bad'], cancelled: ['Cancelled', 'mute']
+};
+const ACTIVE = ['submitted', 'for_approval', 'approved', 'released'];
+const CAT = { gov: ['Government / official activity', 3], comm: ['Community, school, church or barangay', 2], priv: ['Private or business event', 1] };
+const DENY_REASONS = ['Items not available for the dates', 'Request is not for a public or official purpose', 'Incomplete or inconsistent requirements', 'Borrower has unreturned items from a past request', 'Other (see remarks)'];
+const ID_REJECT_REASONS = [
+  'Photo is blurry or cut off',
+  'Name on ID does not match the request',
+  'ID is expired',
+  'ID type is not accepted',
+  'Photo looks edited or does not show an original ID',
+  'Selfie does not match the ID'
+];
+
+/* ============ storage ============ */
+const KEY = 'gso_rts_proto_v3'; let mem = null;
+function loadDB() { try { const s = localStorage.getItem(KEY); if (s) return JSON.parse(s) } catch (e) { } return mem }
+function saveDB() { mem = DB; try { localStorage.setItem(KEY, JSON.stringify(DB)) } catch (e) { toast('Browser storage is full. Remove old requests or reset demo data.') } }
+function mockDoc(kind, name) {
+  const t = kind === 'id' ? 'SAMPLE ID · A REAL ID' : 'SAMPLE LETTER';
+  const body = kind === 'id'
+    ? `<rect x="24" y="64" width="90" height="110" rx="6" fill="#9aa9b6"/><circle cx="69" cy="104" r="22" fill="#cfd8df"/><rect x="134" y="76" width="200" height="12" rx="3" fill="#43546a"/><text x="134" y="118" font-size="15" fill="#13222f" font-family="sans-serif">${esc(name)}</text><rect x="134" y="132" width="150" height="9" rx="3" fill="#b9c4cd"/><rect x="134" y="150" width="120" height="9" rx="3" fill="#b9c4cd"/>`
+    : `<rect x="40" y="56" width="280" height="9" rx="3" fill="#43546a"/>${[78, 96, 114, 132, 150, 168].map(y => `<rect x="40" y="${y}" width="${y % 36 ? 260 : 230}" height="6" rx="3" fill="#c3ccd4"/>`).join('')}<text x="40" y="196" font-size="12" fill="#13222f" font-family="sans-serif">${esc(name)}</text>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220"><rect width="360" height="220" rx="12" fill="#eef2f5"/><rect x="0" y="0" width="360" height="34" rx="12" fill="#0e5a8a"/><text x="14" y="22" font-size="12" fill="#fff" font-family="sans-serif" font-weight="bold">${t}</text>${body}</svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+function seed() {
+  const inv = [
+    { id: 'chair', name: 'Plastic chairs', unit: 'pcs', total: 400 },
+    { id: 'table', name: 'Tables', unit: 'pcs', total: 60 },
+    { id: 'tent', name: 'Tents', unit: 'units', total: 10 },
+    { id: 'sound', name: 'Sound system', unit: 'sets', total: 3 },
+    { id: 'podium', name: 'Podium', unit: 'pcs', total: 4 },
+    { id: 'stage', name: 'Stage platform', unit: 'sets', total: 2 }];
+  const users = [
+    { id: 'u_admin', name: 'Municipal Mayor’s Office', username: 'admin', pw: 'admin123', role: 'admin', active: true },
+    { id: 'u_sec', name: 'Private Secretary II', username: 'secretary', pw: 'sec123', role: 'secretary', active: true },
+    { id: 'u_gso', name: 'GSO Staff (Cultural in-charge)', username: 'gso', pw: 'gso123', role: 'gso', active: true }];
+  const rules = {
+    citizen: {
+      label: 'Citizen (G2C)', desc: 'Individuals, families and residents borrowing for a personal or community event.',
+      ids: ['PhilSys National ID', 'Driver’s License', 'Passport', 'UMID', 'Voter’s ID or Voter’s Certificate', 'Postal ID', 'PRC ID', 'Senior Citizen ID', 'PWD ID', 'Barangay ID or Certificate of Residency'], docs: []
+    },
+    lgu: {
+      label: 'Government office or LGU staff (G2G)', desc: 'Employees borrowing for an official activity of a government office.',
+      ids: ['LGU or agency employee ID', 'Any government-issued ID listed for citizens'], docs: ['Endorsement or memo signed by the office head']
+    },
+    business: {
+      label: 'Business, organization or group', desc: 'Owners or representatives of businesses, schools, churches and associations.',
+      ids: ['Driver’s License', 'Passport', 'PhilSys National ID', 'UMID', 'Voter’s ID or Voter’s Certificate', 'Company or organization ID with a government ID'], docs: ['Authorization letter from the owner or organization', 'Business permit or organization registration']
+    }
+  };
+  const GSO = 'GSO Staff (Cultural in-charge)', SEC = 'Private Secretary II';
+  const mk = (n, o) => Object.assign({ id: `GSO-${new Date().getFullYear()}-${pad(n).padStart(4, '0')}`, createdAt: Date.now() - n * 3.6e6 * 7, att: { front: mockDoc('id', o.name), letter: mockDoc('letter', o.name) }, idStatus: 'verified', log: [], items: [], address: 'Inabanga, Bohol' }, o);
+  const R = [];
+  const add = (n, o, logs) => { const r = mk(n, o); r.log = logs.map((m, i) => ({ t: r.createdAt + i * 9e5, by: m[0], role: m[1], msg: m[2] })); R.push(r) };
+  const sub = n => [n, 'requester', 'Request submitted with ID and documents'];
+  add(1, { rtype: 'citizen', name: 'Maria Dela Cruz', contact: '0917 555 0142', org: 'Brgy. Poblacion Fiesta Committee', eventName: 'Barangay fiesta night', eventType: 'comm', venue: 'Poblacion plaza', start: addDays(7), end: addDays(8), items: [{ id: 'chair', qty: 200 }, { id: 'tent', qty: 3 }, { id: 'table', qty: 20 }], idType: 'PhilSys National ID', idNumber: '4021-5566-7788-1234', idExpiry: '', status: 'approved', reviewedBy: GSO, approvedItems: [{ id: 'chair', qty: 200 }, { id: 'tent', qty: 3 }, { id: 'table', qty: 20 }], approvedBy: SEC, approvedAt: Date.now() - 36e5 * 5 },
+    [sub('Maria Dela Cruz'), [GSO, 'gso', 'ID verified and stock checked. Forwarded to the Secretary'], [SEC, 'secretary', 'Approved. Reservation is official']]);
+  add(2, { rtype: 'lgu', name: 'Rafael Tumulak', contact: '0928 555 0188', org: 'Municipal Health Office', eventName: 'Community vaccination day', eventType: 'gov', venue: 'Municipal gym', start: addDays(7), end: addDays(7), items: [{ id: 'chair', qty: 150 }, { id: 'table', qty: 15 }, { id: 'sound', qty: 1 }], idType: 'LGU or agency employee ID', idNumber: 'LGU-2021-0457', idExpiry: '', status: 'for_approval', reviewedBy: GSO, recoItems: [{ id: 'chair', qty: 150 }, { id: 'table', qty: 15 }, { id: 'sound', qty: 1 }] },
+    [sub('Rafael Tumulak'), [GSO, 'gso', 'ID verified and stock checked. Forwarded to the Secretary']]);
+  add(3, { rtype: 'citizen', name: 'Jose Ramirez', contact: '0935 555 0120', org: '', eventName: 'Debut celebration', eventType: 'priv', venue: 'Ramirez residence, Brgy. Bahi', start: addDays(7), end: addDays(7), items: [{ id: 'chair', qty: 150 }, { id: 'tent', qty: 2 }, { id: 'table', qty: 10 }], idType: 'Driver’s License', idNumber: 'N02-19-004411', idExpiry: addDays(400), status: 'submitted', idStatus: 'pending' },
+    [sub('Jose Ramirez')]);
+  add(4, { rtype: 'citizen', name: 'Ana Bacalso', contact: '0917 555 0171', org: 'San Isidro Parish Youth', eventName: 'Youth retreat', eventType: 'comm', venue: 'Parish hall', start: addDays(12), end: addDays(13), items: [{ id: 'sound', qty: 2 }, { id: 'tent', qty: 4 }, { id: 'podium', qty: 1 }], idType: 'Voter’s ID or Voter’s Certificate', idNumber: '7791-0023', idExpiry: '', status: 'submitted', idStatus: 'pending' },
+    [sub('Ana Bacalso')]);
+  add(5, { rtype: 'lgu', name: 'Rafael Tumulak', contact: '0928 555 0188', org: 'Inabanga National High School', eventName: 'Foundation week program', eventType: 'comm', venue: 'School grounds', start: addDays(-1), end: addDays(1), items: [{ id: 'table', qty: 30 }, { id: 'chair', qty: 100 }, { id: 'stage', qty: 1 }], idType: 'LGU or agency employee ID', idNumber: 'DEPED-33812', idExpiry: '', status: 'released', reviewedBy: GSO, approvedItems: [{ id: 'table', qty: 30 }, { id: 'chair', qty: 100 }, { id: 'stage', qty: 1 }], approvedBy: SEC, approvedAt: Date.now() - 864e5 * 3, release: { at: Date.now() - 864e5, by: GSO, receivedBy: 'Rafael Tumulak', idChecked: true } },
+    [sub('Rafael Tumulak'), [GSO, 'gso', 'ID verified and stock checked. Forwarded to the Secretary'], [SEC, 'secretary', 'Approved. Reservation is official'], [GSO, 'gso', 'Items released to Rafael Tumulak; original ID checked']]);
+  add(6, { rtype: 'business', name: 'Elena Villanueva', contact: '0919 555 0166', org: 'Villanueva Catering', eventName: 'Wedding reception', eventType: 'priv', venue: 'Brgy. Tambook', start: addDays(-6), end: addDays(-5), items: [{ id: 'chair', qty: 120 }, { id: 'table', qty: 12 }, { id: 'tent', qty: 2 }], idType: 'Passport', idNumber: 'P1234567A', idExpiry: addDays(900), att: { front: mockDoc('id', 'Elena Villanueva'), letter: mockDoc('letter', 'Elena Villanueva'), doc0: mockDoc('letter', 'Villanueva Catering'), doc1: mockDoc('letter', 'Business permit') }, status: 'returned', reviewedBy: GSO, approvedItems: [{ id: 'chair', qty: 120 }, { id: 'table', qty: 12 }, { id: 'tent', qty: 2 }], approvedBy: SEC, approvedAt: Date.now() - 864e5 * 9, release: { at: Date.now() - 864e5 * 6, by: GSO, receivedBy: 'Elena Villanueva', idChecked: true }, ret: { at: Date.now() - 864e5 * 4, by: GSO, condition: 'damaged', remarks: '2 tents torn and 10 chairs not returned.', qty: { chair: 110, table: 12, tent: 2 } } },
+    [sub('Elena Villanueva'), [GSO, 'gso', 'ID verified and stock checked. Forwarded to the Secretary'], [SEC, 'secretary', 'Approved. Reservation is official'], [GSO, 'gso', 'Items released'], [GSO, 'gso', 'Items returned: complete and in good condition']]);
+  add(7, { rtype: 'citizen', name: 'Pedro Lumayag', contact: '0906 555 0137', org: '', eventName: 'Family reunion', eventType: 'priv', venue: 'Brgy. Napo', start: addDays(9), end: addDays(9), items: [{ id: 'chair', qty: 60 }, { id: 'table', qty: 6 }], idType: 'Postal ID', idNumber: 'PRN-889031', idExpiry: '', idStatus: 'rejected', idNote: 'Photo is blurry or cut off. Retake the photo with all four corners visible.', status: 'id_issue' },
+    [sub('Pedro Lumayag'), [GSO, 'gso', 'ID rejected: Photo is blurry or cut off']]);
+  add(8, { rtype: 'lgu', name: 'Dina Cabahug', contact: '0927 555 0109', org: 'Municipal Sports Office', eventName: 'Municipal sports fest', eventType: 'gov', venue: 'Municipal oval', start: addDays(3), end: addDays(4), items: [{ id: 'chair', qty: 100 }, { id: 'table', qty: 10 }, { id: 'stage', qty: 1 }, { id: 'sound', qty: 1 }], idType: 'LGU or agency employee ID', idNumber: 'LGU-2019-0233', idExpiry: '', status: 'approved', reviewedBy: GSO, approvedItems: [{ id: 'chair', qty: 100 }, { id: 'table', qty: 10 }, { id: 'stage', qty: 1 }, { id: 'sound', qty: 1 }], approvedBy: SEC, approvedAt: Date.now() - 864e5 },
+    [sub('Dina Cabahug'), [GSO, 'gso', 'ID verified and stock checked. Forwarded to the Secretary'], [SEC, 'secretary', 'Approved. Reservation is official']]);
+  const borrowers = [], bm = {};
+  R.forEach(r => { if (!bm[r.name]) { const u = r.name.split(' ')[0].toLowerCase(); bm[r.name] = { id: 'b_' + u, name: r.name, username: u, pw: u + '123', contact: r.contact, rtype: r.rtype, org: r.org || '', address: 'Inabanga, Bohol', createdAt: Date.now() - 864e5 * 30, active: true }; borrowers.push(bm[r.name]) } r.bid = bm[r.name].id });
+  return { users, borrowers, requests: R, inventory: inv, rules, settings: { selfie: false, advanceDays: 5 }, audit: [], seq: 9 };
+}
+let DB = loadDB() || seed();
+if (!DB.rules || !DB.users || !DB.borrowers) DB = seed();
+saveDB();
+
+/* ============ domain helpers ============ */
+const inv = id => DB.inventory.find(i => i.id === id) || { id, name: id, total: 0, unit: '' };
+const qtyOf = (r, id) => { const l = r.approvedItems || r.items; const x = l.find(i => i.id === id); return x ? x.qty : 0 };
+const recoQty = (r, id) => { const l = r.recoItems || r.items; const x = l.find(i => i.id === id); return x ? x.qty : 0 };
+const committed = (id, s, e, ex) => DB.requests.filter(r => r.id !== ex && (r.status === 'approved' || r.status === 'released') && overlap(r.start, r.end, s, e)).reduce((a, r) => a + qtyOf(r, id), 0);
+const avail = (id, s, e, ex) => Math.max(0, inv(id).total - committed(id, s, e, ex));
+const outranks = (a, b) => ((CAT[b.eventType][1] - CAT[a.eventType][1]) || (a.createdAt - b.createdAt)) < 0;
+function conflicts(r) {
+  if (!['submitted', 'for_approval', 'id_issue'].includes(r.status)) return [];
+  const out = [];
+  r.items.forEach(it => {
+    const others = DB.requests.filter(x => x.id !== r.id && ACTIVE.includes(x.status) && overlap(x.start, x.end, r.start, r.end) && x.items.some(i => i.id === it.id));
+    const demand = it.qty + others.reduce((a, x) => a + qtyOf(x, it.id), 0);
+    if (demand > inv(it.id).total) out.push({ id: it.id, demand, total: inv(it.id).total, rank: 1 + others.filter(x => x.status !== 'approved' && x.status !== 'released' && outranks(x, r)).length, others });
+  });
+  return out;
+}
+const isOverdue = r => r.status === 'released' && r.end < todayISO();
+function retShort(r) { return r.ret ? r.items.filter(i => (r.ret.qty?.[i.id] ?? qtyOf(r, i.id)) < qtyOf(r, i.id)).map(i => ({ name: inv(i.id).name, got: r.ret.qty?.[i.id] ?? 0, of: qtyOf(r, i.id) })) : [] }
+const retIssue = r => r.status === 'returned' && !!r.ret && (r.ret.condition !== 'ok' || retShort(r).length > 0);
+const openIssue = r => retIssue(r) && !r.ret.resolved;
+const flagged = b => DB.requests.some(r => r.bid === b.id && openIssue(r));
+const issuesOf = b => DB.requests.filter(r => r.bid === b.id && openIssue(r));
+const myReqs = b => DB.requests.filter(r => r.bid === b.id).sort((x, y) => y.createdAt - x.createdAt);
+const me = () => DB.borrowers.find(x => x.id === S.bid && x.active) || null;
+const itemsTxt = l => l.map(i => `${i.qty} ${inv(i.id).name.toLowerCase()}`).join(', ');
+const pill = s => `<span class="pill ${STATUS[s][1]}">${STATUS[s][0]}</span>`;
+function addLog(r, msg) { const t = Date.now(); const by = S.user ? S.user.name : r.name; const role = S.user ? S.user.role : 'requester'; r.log.push({ t, by, role, msg }); DB.audit.push({ t, by, role, msg, ref: r.id }) }
+function audit(msg, ref = '') { DB.audit.push({ t: Date.now(), by: S.user ? S.user.name : 'Visitor', role: S.user ? S.user.role : 'requester', msg, ref }) }
+const roleIs = (...a) => a.includes(S.user?.role);
+const can = { review: () => roleIs('gso', 'admin'), approve: () => roleIs('secretary', 'admin'), release: () => roleIs('gso', 'admin') };
+const byId = id => DB.requests.find(r => r.id === id);
+
+/* ============ state ============ */
+const n0 = new Date();
+const S = { user: null, login: false, view: 'home', filter: { status: 'all', q: '' }, modal: null, att: {}, cal: { y: n0.getFullYear(), m: n0.getMonth(), sel: todayISO() }, availDate: { s: addDays(7), e: addDays(7) }, trackQ: '', trackId: null, trackMiss: false, newType: 'citizen', done: null, prefill: null };
+try { S.bid = sessionStorage.getItem('gso_borrower') || null; const bb = S.bid && DB.borrowers.find(x => x.id === S.bid); if (bb) S.newType = bb.rtype; else S.bid = null } catch (e) { }
+try { const u = sessionStorage.getItem('gso_user'); if (u) { const f = DB.users.find(x => x.id === u && x.active); if (f) { S.user = f; S.view = 'dash' } } } catch (e) { }
+function toast(m) { const t = $('#toast'); t.innerHTML = `<div class="toast">${esc(m)}</div>`; clearTimeout(toast.h); toast.h = setTimeout(() => t.innerHTML = '', 3200) }
+
+/* ============ navigation ============ */
+const NAV = {
+  secretary: [['dash', 'Dashboard'], ['all', 'Reservations'], ['idreq', 'ID requirements']],
+  gso: [['dash', 'Dashboard'], ['approvals', 'Release & return'], ['all', 'Reservations'], ['inventory', 'Inventory']],
+  admin: [
+    ['dash', 'Dashboard'],
+    ['all', 'Reservations'],
+    ['history', 'History'],
+    ['borrowers', 'Borrowers'],
+    ['inventory', 'Inventory'],
+    ['rules', 'ID requirements'],
+    ['users', 'Users'],
+    ['audit', 'Audit log']
+  ]
+};
+function go(v) { S.view = v; S.att = {}; S.modal = null; S.done = null; render(); window.scrollTo(0, 0) }
+function badge(v) {
+  if (!S.user || (v !== 'dash' && v !== 'approvals' && v !== 'borrowers')) return '';
+  let n = 0; const R = DB.requests;
+  if (v === 'borrowers') return S.user.role === 'admin' && (n = DB.borrowers.filter(flagged).length) ? `<span class="cnt">${n}</span>` : '';
+  if (v === 'approvals') return (n = R.filter(r => r.status === 'approved' || r.status === 'released').length) ? `<span class="cnt">${n}</span>` : '';
+  if (S.user.role === 'gso') n = R.filter(r => r.status === 'submitted').length;
+  if (S.user.role === 'secretary') n = R.filter(r => r.status === 'for_approval' || openIssue(r)).length;
+  if (S.user.role === 'admin') n = R.filter(r => r.status === 'submitted' || r.status === 'for_approval' || openIssue(r)).length;
+  return n ? `<span class="cnt">${n}</span>` : '';
+}
+const brand = (sub = 'Municipality of Inabanga, Bohol') => `<div class="brand"><div class="mark">GSO</div><div>Logistics Reservation & Tracking<small>${sub}</small></div></div>`;
+
+function render() {
+  if (S.user) return renderStaff();
+  $('#modal').innerHTML = '';
+  if (S.login) return renderLogin();
+  renderPublic();
+}
+
+/* ============ public site ============ */
+const pubNav = () => me() ? [['home', 'Home'], ['new', 'Reserve'], ['mine', 'My reservations'], ['idreq', 'Requirements']] : [['home', 'Home'], ['idreq', 'Requirements']];
+function renderPublic() {
+  const B = me(); if (!B) S.bid = null;
+  if (!B && ['new', 'mine'].includes(S.view)) { S.auth = 'login'; S.view = 'auth' }
+  if (S.view === 'auth' && B) S.view = 'mine';
+  if (S.view !== 'auth' && !pubNav().some(n => n[0] === S.view)) S.view = 'home';
+  const hold = B && flagged(B);
+  $('#app').innerHTML = `
+  <header class="top"><div class="in wrap pubhead">${brand()}
+    <nav class="pubnav" aria-label="Sections">${pubNav().map(([k, l]) => `<button data-act="nav" data-v="${k}" class="${S.view === k ? 'on' : ''}">${l}</button>`).join('')}</nav>
+    <span class="sp"></span>
+    ${B ? `<div class="who"><b>${esc(B.name)}</b><span class="small">${hold ? '<span class="pill bad">● Account on hold</span>' : '<span class="pill ok">Good standing</span>'}</span></div><button class="btn sm" data-act="bsignout">Sign out</button>`
+      : `<button class="btn sm" data-act="showauth" data-m="login">Sign in</button><button class="btn pri sm" data-act="showauth" data-m="register">Create account</button>`}
+    <button class="btn sm ghost" data-act="stafflogin">Staff login</button>
+  </div></header>
+  <main class="pubmain wrap" id="main"></main>
+  <footer class="wrap pubfoot small muted">Free service of the Office of the Municipal Mayor, General Services Office. Book at least ${DB.settings.advanceDays} days ahead.</footer>`;
+  const V = { home: vPubHome, new: vNew, mine: vMine, auth: vAuth, idreq: vIdReq };
+  $('#main').innerHTML = V[S.view]();
+  if (S.view === 'new' && !S.done && !(B && hold)) initNew();
+}
+const loginForm = () => `<form id="fBLogin" class="fsec" autocomplete="off"><label class="f">Username<input id="bl_u" type="text" required></label><label class="f">Password<input id="bl_p" type="password" required></label><div id="blerr" class="small" style="color:var(--bad)" role="alert"></div><button class="btn pri" type="submit">Sign in</button></form>`;
+function vAuth() {
+  const reg = S.auth === 'register';
+  return head(reg ? 'Create a borrower account' : 'Borrower sign in', reg ? 'One account per borrower. You can then reserve items, see what you borrowed and follow each approval.' : 'Sign in to reserve items and follow your requests.') +
+    `<div class="card fsec" style="max-width:560px">
+   <div class="pubnav"><button data-act="showauth" data-m="login" class="${reg ? '' : 'on'}">Sign in</button><button data-act="showauth" data-m="register" class="${reg ? 'on' : ''}">Create account</button></div>
+   ${reg ? `<form id="fBReg" class="fsec" autocomplete="off" novalidate>
+     <label class="f">Full name <span class="hint">Exactly as on your ID</span><input id="br_n" type="text"></label>
+     <div class="grid2"><label class="f">Mobile number<input id="br_c" type="tel" placeholder="09XX XXX XXXX"></label>
+     <label class="f">Borrower type<select id="br_t">${Object.entries(DB.rules).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('')}</select></label></div>
+     <div class="grid2"><label class="f">Office or organization <span class="hint">Optional for citizens</span><input id="br_o" type="text"></label><label class="f">Address<input id="br_a" type="text" value="Inabanga, Bohol"></label></div>
+     <div class="grid2"><label class="f">Username<input id="br_u" type="text" autocapitalize="none"></label><label class="f">Password <span class="hint">At least 6 characters</span><input id="br_p" type="password"></label></div>
+     <div id="brerr"></div><button class="btn pri" type="submit">Create account</button></form>`: loginForm()}
+   </div>`;
+}
+function holdBanner(b, iss) {
+  if (!iss.length) return '';
+  return `<div class="card hold"><div class="row"><span class="pill bad">● Account on hold</span></div>
+  <h2 style="color:var(--bad);margin-top:6px">You cannot make a new request yet</h2>
+  <p style="margin:0">Items from your earlier reservation came back short or damaged. Please go to the GSO office to settle them. The Admin will then clear your account and you can reserve again.</p>
+  <ul class="holdlist">${iss.map(r => { const sh = retShort(r); return `<li><b class="mono">${esc(r.id)}</b> · ${esc(r.eventName)}<br>${sh.length ? '<span class="flag">Missing: ' + sh.map(x => `${x.of - x.got} of ${x.of} ${esc(x.name.toLowerCase())}`).join(', ') + '</span> ' : ''}${r.ret.condition !== 'ok' ? '<span class="flag">Damaged items</span> ' : ''}${r.ret.remarks ? `<div class="small muted">GSO remarks: ${esc(r.ret.remarks)}</div>` : ''}</li>` }).join('')}</ul>
+  ${b.askedAt ? `<div class="notice warn">You told the Admin you are ready to settle (${fmtDT(b.askedAt)}). Bring the items or payment to the GSO office. Your account stays on hold until the Admin clears it.</div>` : `<div><button class="btn" data-act="askclear">I have settled or will settle at the office. Tell the Admin</button></div>`}</div>`;
+}
+function vMine() {
+  const b = me(), list = myReqs(b), iss = issuesOf(b), out = list.filter(r => r.status === 'released');
+  const sel = S.trackId && list.find(r => r.id === S.trackId);
+  return head('My reservations', 'Everything you requested, what you are borrowing now, and who reviewed and approved each step.', `<button class="btn pri" data-act="nav" data-v="new">New request</button>`) + holdBanner(b, iss) +
+    (out.length ? `<div class="card"><h2>Items you are borrowing now</h2><div class="tablewrap"><table><thead><tr><th>Request</th><th>Items</th><th>Return by</th></tr></thead><tbody>${out.map(r => `<tr><td><span class="mono">${esc(r.id)}</span><div class="muted small">${esc(r.eventName)}</div></td><td>${esc(itemsTxt(r.approvedItems || r.items))}</td><td>${isOverdue(r) ? `<span class="flag">Overdue since ${fmtD(r.end)}</span>` : fmtD(r.end)}</td></tr>`).join('')}</tbody></table></div></div>` : '') +
+    `<div class="card"><h2>All my requests</h2>${list.length ? `<div class="tablewrap"><table><thead><tr><th>Tracking no.</th><th>Event</th><th>Dates</th><th>Status</th><th></th></tr></thead><tbody>${list.map(r => `<tr><td class="mono">${esc(r.id)}</td><td>${esc(r.eventName)}<div class="muted small">${esc(itemsTxt(r.approvedItems || r.items))}</div></td><td>${esc(rangeTxt(r))}</td><td>${pill(r.status)}${openIssue(r) ? ' <span class="pill bad">Short / damaged</span>' : ''}</td><td><button class="btn sm ${sel && sel.id === r.id ? 'pri' : ''}" data-act="mineopen" data-id="${esc(r.id)}">View</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No requests yet. Use New request to start.</div>'}</div>` +
+    `<div id="tres">${sel ? trackResult() : ''}</div>`;
+}
+function chainBlock(r) {
+  const L = re => r.log.find(l => re.test(l.msg));
+  const rej = L(/^ID rejected/), fw = L(/Forwarded to the Secretary/), ap = L(/^Approved/), dn = L(/^Request denied/);
+  const st = (t, who, at, cls) => `<li class="${cls}"><span class="dot"></span><div><b>${t}</b><div class="small">${who}</div>${at ? `<time>${fmtDT(at)}</time>` : ''}</div></li>`;
+  const x = [st('Submitted', esc(r.name), r.createdAt, 'done')];
+  if (fw) x.push(st('Reviewed by GSO (ID and stock)', esc(r.reviewedBy || fw.by), fw.t, 'done'));
+  else if (rej) x.push(st('ID not accepted by GSO', esc(rej.by) + '. Upload a new photo.', rej.t, 'bad'));
+  else if (r.status === 'submitted') x.push(st('GSO review', 'Waiting for GSO to check your ID and stock', 0, 'wait'));
+  if (ap) x.push(st('Final approval by the Private Secretary', esc(r.approvedBy || ap.by), ap.t, 'done'));
+  else if (dn) x.push(st('Denied by the Private Secretary', esc(dn.by), dn.t, 'bad'));
+  else if (r.status === 'for_approval') x.push(st('Final approval', 'Waiting for the Private Secretary', 0, 'wait'));
+  if (r.release) x.push(st('Items released by GSO', 'Released by ' + esc(r.release.by) + ', received by ' + esc(r.release.receivedBy), r.release.at, 'done'));
+  else if (r.status === 'approved') x.push(st('Release of items', 'Waiting. Claim at GSO on the event day with your original ID', 0, 'wait'));
+  if (r.ret) x.push(st('Return received by GSO', esc(r.ret.by) + (retIssue(r) ? (r.ret.resolved ? '. Short or damaged, settled.' : '. Short or damaged items recorded') : '. Complete and in good condition'), r.ret.at, retIssue(r) && !r.ret.resolved ? 'bad' : 'done'));
+  else if (r.status === 'released') x.push(st('Return', 'Waiting for you to return the items by ' + fmtD(r.end), 0, 'wait'));
+  return `<h3 style="margin:10px 0 4px">Who reviewed and approved</h3><ul class="chain">${x.join('')}</ul>`;
+}
+function refreshTrack() { const t = $('#tres'); if (t) t.innerHTML = trackResult(); else render() }
+function vPubHome() {
+  return `<section class="hero"><div><h1>Reserve tents, tables, chairs and sound equipment online.</h1>
+    <p>Send your request with a valid ID, then follow it with your tracking number. Available stock for your dates is shown as you fill in the form.</p></div>
+    <div class="row">${me() ? '<button class="btn pri" data-act="nav" data-v="new">Reserve now</button><button class="btn" data-act="nav" data-v="mine">My reservations</button>' : '<button class="btn pri" data-act="showauth" data-m="login">Sign in</button><button class="btn" data-act="showauth" data-m="register">Create account</button>'}</div></section>
+  <div class="grid2">
+    <div class="card"><h2>How it works</h2><ol class="steps">
+      <li><b>1</b><span>Create a borrower account, sign in, then submit your request with a valid ID and any required supporting documents. Your ID number is optional.</span></li>
+      <li><b>2</b><span>GSO checks your ID and the stock for your dates.</span></li>
+      <li><b>3</b><span>The Private Secretary gives the final approval. Only then is it official.</span></li>
+      <li><b>4</b><span>Claim the items at GSO with your original ID, and return them on time. Items returned short or damaged put your account on hold until you settle at the office.</span></li>
+    </ol></div>
+    ${me() ? `<div class="card"><h2>Welcome, ${esc(me().name)}</h2>${flagged(me()) ? '<div class="notice bad"><b>Your account is on hold.</b> Settle the short or damaged items at the GSO office first.</div>' : '<div class="notice ok">Your account is in good standing. You can reserve items.</div>'}<p class="muted">Open My reservations to see what you borrowed and who reviewed and approved it.</p><button class="btn pri" data-act="nav" data-v="mine">My reservations</button></div>` : `<div class="card"><h2>Borrower sign in</h2>${loginForm()}<p class="small muted" style="margin:0">No account yet? <a href="#" data-act="showauth" data-m="register">Create one</a>.</p></div>`}</div>`;
+}
+
+
+function quickTrack() {
+  return `
+    <form id="fTrack" class="fsec">
+      <label class="f">
+        Full Name
+        <input
+          id="trackName"
+          type="text"
+          placeholder="Enter the full name used in the request"
+          required
+          autocomplete="name"
+        >
+      </label>
+
+      <label class="f">
+        Tracking Number
+        <input
+          id="tq"
+          type="text"
+          placeholder="e.g. GSO-2026-0001"
+          value="${esc(S.trackQ || '')}"
+          required
+          autocomplete="off"
+        >
+      </label>
+
+      <button class="btn pri" type="submit">Verify and Track</button>
+    </form>`;
+}
+
+function vTrack() {
+  return head(
+    'Track a request',
+    'Enter the full name and tracking number associated with your reservation.'
+  ) +
+    `<div class="card fsec">
+    ${quickTrack()}
+    <div id="tres">${trackResult()}</div>
+  </div>`;
+}
+
+
+function doTrack(trackingNumber, fullName) {
+  const tracking = trackingNumber.trim().toUpperCase();
+  const name = fullName.trim().toLowerCase();
+
+  // Both details must match the same reservation.
+  const r = DB.requests.find(item =>
+    String(item.id || '').trim().toUpperCase() === tracking &&
+    String(item.name || '').trim().toLowerCase() === name
+  );
+
+  S.trackQ = tracking;
+  S.trackId = r ? r.id : null;
+  S.trackMiss = !r;
+  S.att = {};
+}
+
+
+function statusHelp(r) {
+  const m = { submitted: 'GSO is checking your ID and the stock for your dates.', id_issue: 'Your ID was not accepted. Upload a new photo below.', for_approval: 'GSO cleared your request. Waiting for the final approval of the Private Secretary.', approved: 'Approved. Your reservation is official. Claim the items at the GSO office on the event day and show your original ID.', released: 'The items are with the borrower. Return them on the return date.', returned: 'All done. Thank you for returning the items.', rejected: 'This request was denied.', cancelled: 'This request was cancelled.' };
+  return `<div class="notice ${r.status === 'rejected' || r.status === 'id_issue' ? 'bad' : r.status === 'approved' ? 'ok' : ''}">${m[r.status]}${r.status === 'rejected' && r.remarks ? `<br><b>Reason:</b> ${esc(r.remarks)}` : ''}</div>`;
+}
+function trackResult() {
+  if (S.trackMiss) return `<div class="empty">No request found for that full name and tracking number. Check both and try again.</div>`;
+  const r = S.trackId && byId(S.trackId); if (!r) return '';
+  const live = ['submitted', 'id_issue', 'for_approval', 'approved'].includes(r.status);
+  let h = `<div class="trackcard"><div class="row"><span class="mono"><b>${esc(r.id)}</b></span><span class="sp"></span>${pill(r.status)}</div>
+   <h3 style="margin-top:6px">${esc(r.eventName)}</h3><p class="muted" style="margin:2px 0 10px">${esc(rangeTxt(r))} · ${esc(itemsTxt(r.approvedItems || r.items))}</p>
+   ${statusHelp(r)}
+${chainBlock(r)}
+${returnInspectionBlock(r)}
+<ul class="tl" style="margin-top:14px">${r.log.map(l => `<li><div>${esc(l.msg)}<time>${fmtDT(l.t)}</time></div></li>`).join('')}</ul></div>`;
+  if (live) {
+    h += `<div class="fsec trackcard"><h3>Change this request</h3>
+    ${me() ? '' : `<label class="f">Confirm it is you <span class="hint">Last 4 digits of the mobile number on the request</span><input id="tv_m" type="text" inputmode="numeric" maxlength="4" style="max-width:160px" autocomplete="off"></label>`}`;
+    if (r.status === 'id_issue') {
+      const need = slotsFor(r.rtype).filter(s => ['front', 'back', 'selfie'
+
+      ].includes(s.k) || s.k.startsWith('doc'));
+      h += `<div class="notice bad">${esc(r.idNote || 'Your ID was not accepted.')}</div><div class="slots">${need.map(s => slotHtml(s)).join('')}</div>
+      <label class="f">ID number<input id="rs_num" type="text" value="${esc(r.idNumber)}"></label>
+      <div><button class="btn pri" data-act="tresubmit">Send for checking again</button></div>`;
+    }
+    h += `<div id="tverr"></div><div><button class="btn bad sm" data-act="tcancel">Cancel this request</button></div></div>`;
+  }
+  return h;
+}
+
+/* ============ calendar ============ */
+function calReqs(d, mode) { const st = mode === 'public' ? ['approved', 'released'] : ACTIVE; return DB.requests.filter(r => st.includes(r.status) && r.start <= d && r.end >= d) }
+function loadPct(d) { return Math.max(0, ...DB.inventory.map(i => i.total ? committed(i.id, d, d) / i.total : 0)) }
+function calCard(mode) { return `<div class="card cal" id="calwrap">${calInner(mode)}</div>` }
+function calRefresh() { const w = $('#calwrap'); if (w) w.innerHTML = calInner(S.user ? 'staff' : 'public') }
+function calInner(mode) {
+  const { y, m } = S.cal; const first = new Date(y, m, 1); const lead = first.getDay(); const dim = new Date(y, m + 1, 0).getDate(); const T = todayISO();
+  let cells = ''; for (let i = 0; i < lead; i++)cells += `<span class="day out"></span>`;
+  for (let d = 1; d <= dim; d++) {
+    const ds = `${y}-${pad(m + 1)}-${pad(d)}`; const evs = calReqs(ds, mode); const p = loadPct(ds);
+    const cls = ['day', p >= 1 ? 'full' : p >= .7 ? 'ltd' : p > 0 ? 'some' : '', ds === T ? 'today' : '', ds === S.cal.sel ? 'sel' : '', ds < T ? 'past' : ''].filter(Boolean).join(' ');
+    let chips = '';
+    if (mode === 'public') chips = evs.length ? `<span class="chip accent">${evs.length} reserved</span>` : '';
+    else chips = evs.slice(0, 2).map(r => `<span class="chip ${STATUS[r.status][1]}">${esc(r.eventName)}</span>`).join('') + (evs.length > 2 ? `<span class="more">+${evs.length - 2} more</span>` : '');
+    cells += `<button type="button" class="${cls}" data-act="calday" data-d="${ds}" aria-label="${esc(fmtLong(ds))}, ${evs.length} reservation${evs.length === 1 ? '' : 's'}"><span class="dn">${d}</span><span class="chips">${chips}</span>${evs.length ? `<span class="cn">${evs.length}</span>` : ''}</button>`;
+  }
+  const staffLegend = mode === 'staff' ? `<span><i class="lg warn"></i>Pending GSO</span><span><i class="lg info"></i>Awaiting Secretary</span><span><i class="lg ok"></i>Approved</span><span><i class="lg accent"></i>Released</span>` : '';
+  return `<div class="calhd"><h2>${esc(first.toLocaleDateString('en-PH', { month: 'long', year: 'numeric' }))}</h2>
+    <button class="btn sm" data-act="calnav" data-d="-1" aria-label="Previous month">‹ Prev</button><button class="btn sm" data-act="calnav" data-d="0">Today</button><button class="btn sm" data-act="calnav" data-d="1" aria-label="Next month">Next ›</button></div>
+  <div class="legend"><span><i class="lg some"></i>Some stock reserved</span><span><i class="lg ltd"></i>Limited (70%+ of an item)</span><span><i class="lg full"></i>An item is fully booked</span>${staffLegend}</div>
+  <div class="dow">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(x => `<span>${x}</span>`).join('')}</div><div class="days">${cells}</div>
+  <div class="daypanel">${dayPanel(S.cal.sel, mode)}</div>`;
+}
+function dayPanel(ds, mode) {
+  const evs = calReqs(ds, mode);
+  const av = `<div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Total</th><th class="num">Reserved</th><th class="num">Available</th></tr></thead><tbody>${DB.inventory.map(i => { const c = Math.min(i.total, committed(i.id, ds, ds)); return `<tr><td>${esc(i.name)}</td><td class="num">${i.total}</td><td class="num">${c}</td><td class="num" style="${i.total - c <= 0 ? 'color:var(--bad);font-weight:600' : ''}"><b>${i.total - c}</b></td></tr>` }).join('')}</tbody></table></div>`;
+  if (mode === 'public') return `<h3>${esc(fmtLong(ds))}</h3><p class="muted small" style="margin:2px 0 8px">${evs.length ? `${evs.length} official reservation${evs.length > 1 ? 's' : ''} on this date.` : 'No official reservations yet on this date.'} Stock shown counts approved requests only.</p>${av}${ds >= todayISO() ? `<div style="margin-top:10px"><button class="btn pri" data-act="reserveDate" data-d="${ds}">Reserve for this date</button></div>` : ''}`;
+  return `<h3>${esc(fmtLong(ds))}</h3><div class="fsec" style="margin-top:8px">${av}<div><b class="small">Reservations on this date</b>${reqTable(evs, { empty: 'No active reservations on this date.' })}</div></div>`;
+}
+
+/* ============ shared view helpers ============ */
+const head = (t, p = '', right = '') => `<div class="pagehead"><div class="sp"><h1>${t}</h1>${p ? `<p>${p}</p>` : ''}</div>${right}</div>`;
+function filterBar() {
+  return `<div class="filters"><input id="fq" type="text" placeholder="Search tracking no., name, event" value="${esc(S.filter.q)}" aria-label="Search">
+  <select id="fs" aria-label="Status"><option value="all">All statuses</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${S.filter.status === k ? 'selected' : ''}>${v[0]}</option>`).join('')}</select></div>`;
+}
+function reqTable(list, opts = {}) {
+  if (!list.length) return `<div class="empty">${opts.empty || 'No requests to show.'}</div>`;
+  return `<div class="tablewrap"><table><thead><tr><th>Tracking no.</th><th>Borrower</th><th>Event</th><th>Dates</th><th>Items</th><th>Status</th></tr></thead><tbody>${list.map(r => {
+    const c = conflicts(r).length;
+    return `<tr class="click" tabindex="0" data-act="open" data-id="${esc(r.id)}"><td class="mono">${esc(r.id)}</td><td>${esc(r.name)}<div class="muted small">${esc(r.org || CAT[r.eventType][0])}</div></td><td>${esc(r.eventName)}</td><td style="white-space:nowrap">${esc(rangeTxt(r))}</td><td class="small">${esc(itemsTxt(r.items))}</td><td>${pill(r.status)}${isOverdue(r) ? '<div class="flag">Overdue</div>' : ''}${openIssue(r) ? '<div class="flag">Return issue</div>' : ''}${c ? '<div class="flag">Date conflict</div>' : ''}</td></tr>`
+  }).join('')}</tbody></table></div>`;
+}
+function applyFilter(list) {
+  const q = S.filter.q.trim().toLowerCase();
+  return list.filter(r => (S.filter.status === 'all' || r.status === S.filter.status) && (!q || [r.id, r.name, r.eventName, r.org].join(' ').toLowerCase().includes(q))).sort((a, b) => b.createdAt - a.createdAt);
+}
+function availTable(s, e) {
+  return `<div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Total stock</th><th class="num">Committed</th><th class="num">Available</th><th style="width:30%">Usage</th></tr></thead><tbody>${DB.inventory.map(i => {
+    const c = Math.min(i.total, committed(i.id, s, e)); const pct = i.total ? Math.round(c / i.total * 100) : 0;
+    return `<tr><td>${esc(i.name)}</td><td class="num">${i.total}</td><td class="num">${c}</td><td class="num"><b>${i.total - c}</b></td><td><div class="bar"><i style="width:${pct}%;${pct >= 90 ? 'background:var(--bad)' : ''}"></i></div></td></tr>`
+  }).join('')}</tbody></table></div>`;
+}
+const stat = (n, l, alert) => `<div class="stat ${alert && n ? 'alert' : ''}"><b>${n}</b><span>${l}</span></div>`;
+
+/* ============ public: requirements and reserve form ============ */
+function vIdReq() {
+  return head(
+    'ID requirements',
+    'Have these ready so GSO can verify who is borrowing. Requirements depend on who you are borrowing as.'
+  ) +
+    `<div class="notice ok">
+    <b>Always required:</b> a clear photo of one valid, unexpired original ID
+    (front, and back if it has printed details)
+    ${DB.settings.selfie ? ', a selfie holding the same ID' : ''}.
+    Your ID number is optional. Any supporting documents listed for your
+    borrower type are still required.
+  </div>` +
+
+    Object.values(DB.rules).map(r => `
+    <div class="card">
+      <h2>${esc(r.label)}</h2>
+      <p class="muted" style="margin:0 0 10px">${esc(r.desc)}</p>
+
+      <div class="grid2">
+        <div>
+          <h3>Accepted IDs</h3>
+          <ul class="reqlist">
+            ${r.ids.map(i => `<li>${esc(i)}</li>`).join('')}
+          </ul>
+        </div>
+
+        <div>
+          <h3>Other documents</h3>
+          <ul class="reqlist">
+            ${r.docs.map(i => `<li>${esc(i)}</li>`).join('') || '<li>None</li>'}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `).join('') +
+
+    `<div class="card">
+    <h3>Photo tips</h3>
+    <ul class="reqlist">
+      <li>Use the original ID, not a photocopy or screenshot.</li>
+      <li>Show all four corners. Avoid glare and shadows.</li>
+      <li>Name and expiry date must be readable. The ID number is optional.</li>
+      <li>The name on the ID must match the name on the request.</li>
+      <li>When you claim the items, show the same original ID to GSO.</li>
+    </ul>
+
+    <p class="small muted" style="margin:10px 0 0">
+      Your ID is used only to verify your request, in line with the
+      Data Privacy Act of 2012.
+    </p>
+  </div>`;
+}
+function vNew() {
+  if (S.done) return successView(byId(S.done));
+  const pf = S.prefill; S.prefill = null; const sd = pf?.s || addDays(DB.settings.advanceDays);
+  const B = me(); if (flagged(B)) return head('Reserve items', 'Your account is on hold.') + holdBanner(B, issuesOf(B));
+  return head('Reserve items', 'Request for logistic assistance. This replaces the paper letter and Borrower’s Slip.') +
+    `<form id="fNew" class="fsec" autocomplete="off" novalidate>
+   <div class="card fsec"><h2><span class="step">1</span>Who is borrowing</h2>
+     <div class="typepick" id="typepick">${Object.entries(DB.rules).map(([k, v]) => `<label><input type="radio" name="rtype" value="${k}" ${k === S.newType ? 'checked' : ''}><span><b>${esc(v.label)}</b><span class="muted small">${esc(v.desc)}</span></span></label>`).join('')}</div>
+     <div class="grid2"><label class="f">Full name <span class="hint">Exactly as on your ID</span><input id="n_name" type="text" placeholder="First and last name" value="${esc(B.name)}"></label>
+     <label class="f">Mobile number<input id="n_contact" type="tel" placeholder="09XX XXX XXXX" value="${esc(B.contact)}"></label></div>
+     <div class="grid2"><label class="f" id="orgl">Office or organization<input id="n_org" type="text" value="${esc(B.org)}"></label><label class="f">Address<input id="n_addr" type="text" value="${esc(B.address)}"></label></div>
+   </div>
+   <div class="card fsec"><h2><span class="step">2</span>Event and dates</h2>
+     <div class="grid2"><label class="f">Event name<input id="n_event" type="text"></label>
+     <label class="f">Event type <span class="hint">Used for priority when dates conflict. GSO confirms it</span><select id="n_cat">${['priv', 'comm', 'gov'].map(k => `<option value="${k}">${CAT[k][0]}</option>`).join('')}</select></label></div>
+     <label class="f">Venue<input id="n_venue" type="text"></label>
+     <div class="grid2"><label class="f">Date needed<input id="n_start" type="date" min="${todayISO()}" value="${sd}"></label><label class="f">Date of return<input id="n_end" type="date" min="${sd}" value="${sd}"></label></div>
+     <div id="advwarn"></div>
+   </div>
+   <div class="card fsec"><h2><span class="step">3</span>Items</h2>
+     <div id="itemlist">${DB.inventory.map(i => `<div class="itemrow"><div><b>${esc(i.name)}</b><span class="av" id="av_${i.id}"></span></div><input type="number" min="0" max="${i.total}" step="1" inputmode="numeric" id="q_${i.id}" data-item="${i.id}" placeholder="0" aria-label="Quantity of ${esc(i.name)}"></div>`).join('')}</div>
+     <p class="small muted" style="margin:0">Counts are live and based on official reservations for your dates. If another request wants the same items, priority goes to government activity, then community events, then private events, then whoever asked first.</p>
+   </div>
+   <div class="card fsec"><h2><span class="step">4</span>ID verification</h2><div id="idsec"></div></div>
+   <div class="card fsec"><h2><span class="step">5</span>Terms and consent</h2>
+     <div class="checks">
+      <label><input type="checkbox" id="c_terms">I will pay for any damage caused by my fault, provide transport to the venue, and account for all items on return.</label>
+      <label><input type="checkbox" id="c_priv">I agree that GSO and the Mayor’s Office may process my ID and details to verify and track this request (Data Privacy Act of 2012).</label>
+      <label><input type="checkbox" id="c_true">The ID and documents I uploaded are genuine and belong to me or my organization.</label></div>
+     <div id="nerr"></div>
+     <div class="row"><button class="btn pri" type="submit">Submit request</button><button class="btn" type="button" data-act="nav" data-v="home">Cancel</button></div>
+   </div></form>`;
+}
+function successView(r) {
+  return `<div class="card fsec done"><span class="pill ok" style="align-self:flex-start">Request received</span>
+   <h1>Your tracking number</h1><div class="tn mono" id="tnum">${esc(r.id)}</div>
+   <div class="row"><button class="btn pri" data-act="trackthis">View in My reservations</button><button class="btn" data-act="newagain">Make another request</button></div>
+   <div class="notice warn">This request is saved in your account. You can follow who reviewed and approved it under My reservations.</div>
+   <h3>What happens next</h3><ol class="steps"><li><b>1</b><span>GSO checks your ID and the stock for ${esc(rangeTxt(r))}.</span></li><li><b>2</b><span>The Private Secretary gives the final approval.</span></li><li><b>3</b><span>Once approved, claim the items at GSO with your original ID.</span></li></ol></div>`;
+}
+function idSection(t) {
+  const R = DB.rules[t];
+
+  return `
+    <div class="notice">
+      <b>Accepted for ${esc(R.label)}:</b>
+      ${R.ids.map(esc).join('; ')}.
+    </div>
+
+    <div class="grid3">
+      <label class="f">
+        ID type
+        <select id="n_idtype">
+          ${R.ids.map(i => `<option>${esc(i)}</option>`).join('')}
+        </select>
+      </label>
+
+      <label class="f">
+    ID number <span class="hint">(Optional)</span>
+    <input id="n_idnum" type="text">
+</label>
+
+      <label class="f">
+        Expiry date <span class="hint">Leave blank if none</span>
+        <input id="n_idexp" type="date">
+      </label>
+    </div>
+
+    <div class="slots">
+      ${slotsFor(t).map(s => slotHtml(s)).join('')}
+    </div>
+  `;
+}
+
+function slotsFor(t) {
+  const R = DB.rules[t];
+
+  const slots = [
+    { k: 'front', label: 'ID, front', req: true },
+    { k: 'back', label: 'ID, back (if it has printed details)', req: false }
+  ];
+
+  if (DB.settings.selfie) {
+    slots.push({
+      k: 'selfie',
+      label: 'Selfie holding the same ID',
+      req: true
+    });
+  }
+
+  // Add other required supporting documents, excluding the Mayor's letter.
+
+  R.docs
+    .filter(doc =>
+      !doc.trim().toLowerCase().includes('letter of request to the mayor')
+    )
+    .forEach(doc => {
+      const originalIndex = R.docs.indexOf(doc);
+
+      slots.push({
+        k: 'doc' + originalIndex,
+        label: doc,
+        req: true
+      });
+    });
+
+  return slots;
+}
+
+function slotHtml(s) {
+  const v = S.att[s.k];
+  return `<div class="slot ${v ? 'done' : ''}" id="slot_${s.k}"><div class="t">${esc(s.label)} ${s.req ? '' : '<span class="muted">(optional)</span>'}</div>
+  ${v ? `<img src="${v}" alt="${esc(s.label)}" data-act="zoomnew" data-k="${s.k}">` : ''}
+  <input type="file" accept="image/jpeg,image/png,image/webp" data-slot="${s.k}" aria-label="Upload ${esc(s.label)}"><div class="small" id="se_${s.k}" style="color:var(--bad)"></div></div>`;
+}
+function initNew() { $('#idsec').innerHTML = idSection(S.newType); syncOrg(); refreshAvail() }
+function syncOrg() { const o = $('#orgl'); if (o) o.firstChild.textContent = S.newType === 'citizen' ? 'Office or organization (optional)' : 'Office or organization' }
+function refreshAvail() {
+  const s = $('#n_start')?.value, e = $('#n_end')?.value; if (!s || !e) return;
+  const lead = dayDiff(todayISO(), s);
+  $('#advwarn').innerHTML = e < s ? `<div class="notice bad">Return date is before the date needed.</div>` : lead < DB.settings.advanceDays ? `<div class="notice warn">Requests should be made at least ${DB.settings.advanceDays} days ahead. Short-notice requests may not be processed in time.</div>` : '';
+  DB.inventory.forEach(i => {
+    const a = avail(i.id, s, e); const q = +($('#q_' + i.id)?.value || 0); const el = $('#av_' + i.id); if (!el) return;
+    el.className = 'av' + (q > a ? ' low' : '');
+    el.textContent = q > a ? `${a} of ${i.total} available for your dates. Your quantity will be contested.` : `${a} of ${i.total} ${i.unit} available for your dates`;
+  });
+}
+async function onFile(inp) {
+  const k = inp.dataset.slot; const f = inp.files[0]; const err = $('#se_' + k);
+  if (!f) return; err.textContent = '';
+  try { S.att[k] = await readImage(f) } catch (e) { err.textContent = e; inp.value = ''; return }
+  const rt = S.modal ? byId(S.modal)?.rtype : (S.view === 'track' && S.trackId ? byId(S.trackId)?.rtype : S.newType);
+  const slot = (slotsFor(rt || S.newType).find(s => s.k === k)) || { k, label: k, req: true };
+  $('#slot_' + k).outerHTML = slotHtml(slot);
+}
+function readImage(file) {
+  return new Promise((res, rej) => {
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return rej('Upload a JPG, PNG or WebP photo.');
+    if (file.size > 10 * 1024 * 1024) return rej('File is larger than 10 MB.');
+    const r = new FileReader();
+    r.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        if (img.width < 320 || img.height < 200) return rej('Photo is too small to read. Retake it closer.');
+        const s = Math.min(1, 1000 / Math.max(img.width, img.height)); const c = document.createElement('canvas');
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        res(c.toDataURL('image/jpeg', .72))
+      };
+      img.onerror = () => rej('Could not read that image.'); img.src = r.result
+    };
+    r.onerror = () => rej('Could not read the file.'); r.readAsDataURL(file)
+  })
+}
+
+function submitNew() {
+  const g = id => ($(id)?.value || '').trim();
+  const t = S.newType;
+  const errs = [];
+
+  const name = g('#n_name');
+  const contact = g('#n_contact');
+  const org = g('#n_org');
+  const ev = g('#n_event');
+  const venue = g('#n_venue');
+  const s = g('#n_start');
+  const e = g('#n_end');
+
+  // ID number is optional.
+  const idnum = g('#n_idnum');
+  const idexp = g('#n_idexp');
+
+  if (name.split(/\s+/).length < 2) {
+    errs.push('Enter your full name, first and last, exactly as on your ID.');
+  }
+
+  if (!/^[0-9+\s-]{7,}$/.test(contact) || last4(contact).length < 4) {
+    errs.push('Enter a valid mobile number.');
+  }
+
+  if (t !== 'citizen' && !org) {
+    errs.push('Enter your office or organization.');
+  }
+
+  if (!ev) errs.push('Enter the event name.');
+  if (!venue) errs.push('Enter the venue.');
+
+  if (!s || !e || s < todayISO()) {
+    errs.push('Choose a date needed that is today or later.');
+  } else if (e < s) {
+    errs.push('Return date cannot be before the date needed.');
+  }
+
+  const items = DB.inventory
+    .map(i => ({
+      id: i.id,
+      qty: Math.floor(+($('#q_' + i.id).value || 0))
+    }))
+    .filter(i => i.qty > 0);
+
+  if (!items.length) {
+    errs.push('Enter a quantity for at least one item.');
+  }
+
+  items.forEach(i => {
+    if (i.qty > inv(i.id).total) {
+      errs.push(
+        `${inv(i.id).name}: GSO owns only ${inv(i.id).total}. Lower the quantity.`
+      );
+    }
+  });
+
+  const BB = me();
+
+  if (!BB) {
+    errs.push('Sign in first.');
+  } else if (flagged(BB)) {
+    errs.push(
+      'Your account is on hold. Settle the short or damaged items at the GSO office first.'
+    );
+  }
+
+  if (idexp && idexp < todayISO()) {
+    errs.push('Your ID is expired. Use a valid ID.');
+  } else if (idexp && e && idexp < e) {
+    errs.push(
+      'Your ID expires before the return date. Use an ID valid through the event.'
+    );
+  }
+
+  // Validate only the required upload slots.
+  // No Mayor's request letter is included in slotsFor().
+  slotsFor(t).filter(x => x.req).forEach(x => {
+    if (!S.att[x.k]) {
+      errs.push(`Upload: ${x.label}.`);
+    }
+  });
+
+  if (
+    !$('#c_terms').checked ||
+    !$('#c_priv').checked ||
+    !$('#c_true').checked
+  ) {
+    errs.push('Tick all three confirmations in step 5.');
+  }
+
+  const box = $('#nerr');
+
+  if (errs.length) {
+    box.innerHTML = `
+      <div class="errs" role="alert">
+        <b>Fix these before submitting:</b>
+        <ul>${errs.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+      </div>
+    `;
+
+    box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    return;
+  }
+
+  const att = {};
+
+  slotsFor(t).forEach(x => {
+    if (S.att[x.k]) att[x.k] = S.att[x.k];
+  });
+
+  const id = `GSO-${new Date().getFullYear()}-${String(DB.seq++).padStart(4, '0')}`;
+
+  const r = {
+    id,
+    createdAt: Date.now(),
+    rtype: t,
+    name,
+    contact,
+    org,
+    address: g('#n_addr'),
+    eventName: ev,
+    eventType: $('#n_cat').value,
+    venue,
+    start: s,
+    end: e,
+    items,
+    idType: $('#n_idtype').value,
+    idNumber: idnum, // May be an empty string.
+    idExpiry: idexp,
+    att,
+    idStatus: 'pending',
+    status: 'submitted',
+    bid: BB.id,
+    log: []
+  };
+
+  DB.requests.push(r);
+  addLog(r, 'Request submitted with ID and documents');
+  saveDB();
+
+  S.att = {};
+  S.done = id;
+  render();
+  window.scrollTo(0, 0);
+}
+
+/* ============ staff shell ============ */
+function renderLogin() {
+  $('#app').innerHTML = `<div class="auth">
+  <section class="l">${brand('Office of the Municipal Mayor').replace('class="mark"', 'class="mark" style="background:#fff;color:#0e5a8a"').replace('<small>', '<small style="color:inherit;opacity:.85">')}
+    <h1>Staff sign-in</h1>
+    <ol class="flow">
+      <li><b>GSO</b><span>Reviews each request: ID, documents and stock. Releases and receives the items. Keeps the inventory.</span></li>
+      <li><b>Secretary</b><span>Gives the final approval that makes a reservation official.</span></li>
+      <li><b>Admin</b><span>Controls accounts, requirements and records.</span></li></ol>
+  </section>
+  <section class="r"><h2>Sign in</h2><p class="muted" style="margin:0">For the General Services Office, the Private Secretary and the Admin.</p>
+    <form id="fLogin" class="fsec" autocomplete="off">
+      <label class="f">Username<input id="lu" type="text" required></label>
+      <label class="f">Password<input id="lp" type="password" required></label>
+      <div id="lerr" class="small" style="color:var(--bad)" role="alert"></div>
+      <button class="btn pri" type="submit">Sign in</button>
+    </form>
+    <div><button class="btn" data-act="publicsite">Back to the public page</button></div>
+  </section></div>`;
+}
+function renderStaff() {
+  const role = S.user.role;
+  if (!NAV[role].some(n => n[0] === S.view)) S.view = 'dash';
+  $('#app').innerHTML = `
+  <header class="top"><div class="in wrap">${brand()}<div class="sp"></div>
+    <div class="who"><b>${esc(S.user.name)}</b><span class="muted small role-line">${ROLE_LABEL[role]}</span></div>
+    <button class="btn sm" data-act="logout">Sign out</button></div></header>
+  <div class="layout wrap">
+    <nav class="side" aria-label="Sections">${NAV[role].map(([k, l]) => `<button data-act="nav" data-v="${k}" class="${S.view === k ? 'on' : ''}">${l}${badge(k)}</button>`).join('')}</nav>
+    <main id="main"></main>
+  </div>`;
+  const V = {
+    dash: { gso: vGso, secretary: vSec, admin: vAdmin }[role],
+    approvals: vApprovals,
+    all: vAll,
+    idreq: vIdReq,
+    history: role === 'admin' ? vHistory : undefined,
+    borrowers: role === 'admin' ? vBorrowers : undefined,
+    inventory: vInventory,
+    rules: vRules,
+    users: vUsers,
+    audit: vAudit
+  };
+  $('#main').innerHTML = V[S.view]();
+  renderModal();
+}
+
+/* ============ staff dashboards (each with a calendar) ============ */
+function approvalRows() {
+  const T = todayISO(); const R = DB.requests;
+  const rel = R.filter(r => r.status === 'approved');
+  const out = R.filter(r => r.status === 'released');
+  return { T, rel, out, rows: [...out.map(r => ({ r, k: 'return', w: isOverdue(r) ? 0 : 1 })), ...rel.map(r => ({ r, k: 'release', w: r.start <= T ? 2 : 3 }))].sort((a, b) => a.w - b.w || a.r.start.localeCompare(b.r.start)) };
+}
+function vApprovals() {
+  const { T, rel, out, rows } = approvalRows();
+  const card = `<div class="card"><h2>Items to release or receive</h2><p class="muted small" style="margin:0 0 8px">Overdue returns first, then items ready to release. The button opens the request at the approval step.</p>${rows.length ? `<div class="tablewrap"><table><thead><tr><th>Tracking no.</th><th>Borrower</th><th>Items</th><th>When</th><th>Action</th></tr></thead><tbody>${rows.map(({ r, k }) => `<tr><td class="mono">${esc(r.id)}</td><td>${esc(r.name)}<div class="muted small">${esc(r.eventName)}</div></td><td class="small">${esc(itemsTxt(r.approvedItems || r.items))}</td><td>${k === 'release' ? (r.start <= T ? '<b>Release today</b>' : 'Release on ' + fmtD(r.start)) : (isOverdue(r) ? `<span class="flag">Overdue since ${fmtD(r.end)}</span>` : 'Due back ' + fmtD(r.end))}</td><td><button class="btn pri sm" data-act="openact" data-id="${esc(r.id)}">${k === 'release' ? 'Approve release' : 'Approve return'}</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nothing to release or receive right now.</div>'}</div>`;
+  return head('Release & return approvals', 'Approve the release of approved items on the event day, and approve the return when they come back.') +
+    `<div class="stats">${stat(rel.filter(r => r.start <= T).length, 'Ready to release today')}${stat(rel.length, 'Approved, to release')}${stat(out.length, 'Out with borrowers')}${stat(out.filter(isOverdue).length, 'Overdue returns', 1)}</div>` + card;
+}
+function vGso() {
+  const T = todayISO(); const R = DB.requests;
+  const rev = R.filter(r => r.status === 'submitted').sort((a, b) => a.createdAt - b.createdAt);
+  const { rel, out } = approvalRows();
+  return head('GSO dashboard', 'Updated schedule and reservations. Review new requests here. Releases and returns are under Release & return.') +
+    `<div class="stats">${stat(rev.length, 'To review (ID and stock)', 1)}${stat(rel.filter(r => r.start <= T).length, 'Ready to release today')}${stat(out.length, 'Out with borrowers')}${stat(out.filter(isOverdue).length, 'Overdue returns', 1)}</div>` +
+    calCard('staff') +
+    `<div class="card"><h2>To review</h2>${reqTable(rev, { empty: 'No new requests waiting for review.' })}</div>`;
+}
+function issueCard(list) { return list.length ? `<div class="card" style="border-color:var(--bad)"><h2 style="color:var(--bad)">Returned short or damaged</h2><p class="muted small" style="margin:0 0 8px">GSO approved these returns with a problem. The borrower sees the same notice on the Track page. Open one to read the details and mark it resolved.</p>${reqTable(list)}</div>` : '' }
+function vSec() {
+  const R = DB.requests;
+  const wait = R.filter(r => r.status === 'for_approval').sort((a, b) => a.createdAt - b.createdAt);
+  const done = R.filter(r => r.status === 'approved').sort((a, b) => (b.approvedAt || 0) - (a.approvedAt || 0)).slice(0, 6);
+  const iss = R.filter(openIssue);
+  return head('Secretary dashboard', 'You give the final approval. A reservation becomes official only after you approve it.') +
+    `<div class="stats">${stat(wait.length, 'Awaiting your approval', 1)}${stat(wait.filter(r => conflicts(r).length).length, 'With date conflicts', 1)}${stat(R.filter(r => r.status === 'approved').length, 'Approved, upcoming')}${stat(iss.length, 'Returns with issues', 1)}</div>` +
+    issueCard(iss) + calCard('staff') +
+    `<div class="card"><h2>Awaiting your approval</h2>${reqTable(wait, { empty: 'Nothing is waiting for your approval.' })}</div>
+  <div class="card"><h2>Recently approved</h2>${reqTable(done, { empty: 'No approved requests yet.' })}</div>`;
+}
+function vAdmin() {
+  const R = DB.requests; const n = s => R.filter(r => r.status === s).length; const max = Math.max(1, ...Object.keys(STATUS).map(n));
+  return head('Admin dashboard', 'Overview of every reservation, with full control of accounts and requirements.') +
+    `<div class="stats">${stat(R.length, 'Total requests')}${stat(n('submitted') + n('for_approval'), 'Pending decision')}${stat(n('released'), 'Items out')}${stat(R.filter(isOverdue).length, 'Overdue', 1)}${stat(R.filter(openIssue).length, 'Returns with issues', 1)}${stat(DB.users.filter(u => u.active).length, 'Active staff accounts')}</div>` +
+    issueCard(R.filter(openIssue)) + calCard('staff') +
+    `<div class="grid2"><div class="card"><h2>Requests by status</h2><div class="fsec" style="gap:8px">${Object.entries(STATUS).map(([k, v]) => `<div class="row" style="flex-wrap:nowrap"><span style="width:170px" class="small">${v[0]}</span><div class="bar sp"><i style="width:${n(k) / max * 100}%"></i></div><b class="small" style="width:22px;text-align:right">${n(k)}</b></div>`).join('')}</div></div>
+  <div class="card"><h2>Needs attention</h2>${reqTable(R.filter(r => isOverdue(r) || conflicts(r).length).slice(0, 5), { empty: 'No overdue returns or date conflicts.' })}</div></div>
+  <div class="card"><h2>Stock committed in the next 14 days</h2>${availTable(todayISO(), addDays(14))}</div>`;
+}
+function vAll() {
+  return head('Reservations', 'All requests, newest first.') +
+    `<div class="card fsec">
+      ${filterBar()}
+      <div id="listwrap">
+        ${reqTable(applyFilter(DB.requests))}
+      </div>
+    </div>`;
+}
+
+function vBorrowers() {
+  const L = DB.borrowers.slice().sort((a, b) => flagged(b) - flagged(a) || a.name.localeCompare(b.name));
+  return head('Borrower accounts', 'Accounts with short or damaged returns are on hold and cannot make a new request. Clear the account once the borrower has settled at the office.') +
+    `<div class="stats">${stat(DB.borrowers.length, 'Borrower accounts')}${stat(L.filter(flagged).length, 'On hold', 1)}${stat(L.filter(b => flagged(b) && b.askedAt).length, 'Say they have settled')}</div>
+  <div class="card"><div class="tablewrap"><table><thead><tr><th>Borrower</th><th>Username</th><th>Requests</th><th>Standing</th><th>Settle at office</th></tr></thead><tbody>${L.map(b => {
+      const iss = issuesOf(b); return `<tr><td>${esc(b.name)}<div class="muted small">${esc(DB.rules[b.rtype]?.label || '')}${b.org ? ' · ' + esc(b.org) : ''}<br>${esc(b.contact)}</div></td><td class="mono">${esc(b.username)}</td><td>${myReqs(b).length}</td>
+  <td>${iss.length ? `<span class="pill bad">● On hold</span>${b.askedAt ? '<div class="small">Asked for clearance ' + fmtD(iso(b.askedAt)) + '</div>' : ''}` : '<span class="pill ok">Good standing</span>'}</td>
+  <td>${iss.length ? `<div class="small" style="margin-bottom:4px">${iss.map(r => `<a href="#" data-act="openreq" data-id="${esc(r.id)}">${esc(r.id)}</a>: ${esc([...retShort(r).map(x => (x.of - x.got) + ' ' + x.name.toLowerCase() + ' missing'), r.ret.condition !== 'ok' ? 'damaged' : ''].filter(Boolean).join(', '))}`).join('<br>')}</div><input type="text" data-bn="${b.id}" placeholder="Note, e.g. paid at cashier" style="width:200px" aria-label="Settlement note for ${esc(b.name)}"> <button class="btn pri sm" data-act="settle" data-id="${b.id}">Mark settled</button>` : '<span class="muted small">Nothing to settle</span>'}</td></tr>`
+    }).join('')}</tbody></table></div></div>`;
+}
+function vHistory() {
+  const R = [...DB.requests].sort(
+    (a, b) => b.createdAt - a.createdAt
+  );
+
+  return head(
+    'Reservation History',
+    'View all reservation records, newest first.'
+  ) +
+    `<div class="card fsec">
+    <h2>All reservation records</h2>
+    ${reqTable(R, {
+      empty: 'No reservation history is available yet.'
+    })}
+  </div>`;
+}
+/* ============ inventory (GSO, Admin) ============ */
+function vInventory() {
+  const { s, e } = S.availDate;
+  return head('Inventory', 'Edit the exact stock. Public requests are checked against these numbers.') +
+    `<div class="card"><h2>Stock count</h2><div class="tablewrap"><table><thead><tr><th>Item</th><th>Unit</th><th class="num" style="width:130px">Total owned</th><th></th></tr></thead><tbody>${DB.inventory.map(i => `<tr><td><input type="text" value="${esc(i.name)}" data-iname="${i.id}" aria-label="Item name"></td><td><input type="text" value="${esc(i.unit)}" data-iunit="${i.id}" style="max-width:90px" aria-label="Unit"></td><td><input type="number" min="0" value="${i.total}" data-stock="${i.id}" aria-label="Total ${esc(i.name)}"></td><td><button class="btn sm bad" data-act="delitem" data-id="${i.id}">Remove</button></td></tr>`).join('')}</tbody></table></div>
+  <div class="row" style="margin-top:12px"><button class="btn pri" data-act="savestock">Save changes</button><span class="muted small">Lowering stock below what is already approved will not cancel approvals.</span></div></div>
+  <form id="fItem" class="card fsec"><h2>Add an item</h2><div class="grid3"><label class="f">Name<input id="ai_n" type="text" required></label><label class="f">Unit<input id="ai_u" type="text" value="pcs" required></label><label class="f">Total owned<input id="ai_t" type="number" min="0" value="1" required></label></div><div><button class="btn" type="submit">Add item</button></div></form>
+  <div class="card fsec"><h2>Check a date range</h2><div class="grid2"><label class="f">From<input id="av_s" type="date" value="${s}"></label><label class="f">To<input id="av_e" type="date" value="${e}"></label></div>${availTable(s, e)}</div>`;
+}
+
+/* ============ admin pages ============ */
+function vUsers() {
+  return head('Staff accounts', 'Only these accounts can sign in. Public requesters need no account.') +
+    `<div class="card"><div class="tablewrap"><table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th></th></tr></thead><tbody>${DB.users.map(u => `<tr><td>${esc(u.name)}</td><td class="mono">${esc(u.username)}</td><td>${ROLE_LABEL[u.role]}</td><td>${u.active ? '<span class="pill ok">Active</span>' : '<span class="pill mute">Disabled</span>'}</td>
+   <td><div class="row" style="flex-wrap:nowrap"><input type="password" data-pw="${u.id}" placeholder="New password" style="width:140px" aria-label="New password for ${esc(u.username)}"><button class="btn sm" data-act="setpw" data-id="${u.id}">Set</button></div></td>
+   <td>${u.id === S.user.id ? '<span class="muted small">You</span>' : `<button class="btn sm" data-act="togu" data-id="${u.id}">${u.active ? 'Disable' : 'Enable'}</button>`}</td></tr>`).join('')}</tbody></table></div></div>
+  <form id="fUser" class="card fsec"><h2>Add staff account</h2>
+   <div class="grid2"><label class="f">Full name or position<input id="au_n" type="text" required></label><label class="f">Username<input id="au_u" type="text" required></label>
+   <label class="f">Role<select id="au_r"><option value="gso">General Services Office</option><option value="secretary">Private Secretary</option><option value="admin">Admin (Mayor’s Office)</option></select></label>
+   <label class="f">Temporary password<input id="au_p" type="password" minlength="6" required></label></div>
+   <div id="auerr" class="small" style="color:var(--bad)"></div><div><button class="btn pri" type="submit">Add account</button></div></form>`;
+}
+function vRules() {
+  return head('ID requirements', 'Decide which IDs and documents each kind of borrower must provide. Changes apply to new requests right away.') +
+    `<div class="card fsec"><h2>Verification settings</h2><div class="checks"><label><input type="checkbox" id="ru_selfie" ${DB.settings.selfie ? 'checked' : ''}>Require a selfie holding the ID</label></div>
+  <label class="f" style="max-width:260px">Advance notice (days)<input id="ru_adv" type="number" min="0" max="30" value="${DB.settings.advanceDays}"></label></div>` +
+    Object.entries(DB.rules).map(([k, r]) => `<div class="card fsec"><h2>${esc(r.label)}</h2>
+   <div class="grid2"><label class="f">Accepted IDs <span class="hint">One per line</span><textarea data-rule="${k}" data-f="ids" rows="7">${esc(r.ids.join('\n'))}</textarea></label>
+  <label class="f">
+  Extra documents required
+  <span class="hint">Only the documents listed here are required.</span>
+  <textarea data-rule="${k}" data-f="docs" rows="7">${esc(r.docs.join('\n'))}</textarea>
+</label></div></div>`).join('') +
+    `<div class="row"><button class="btn pri" data-act="saverules">Save requirements</button></div>`;
+}
+function vAudit() {
+  const a = [...DB.audit].reverse().slice(0, 200);
+  return head('Audit log', 'Who did what, most recent first.', `<button class="btn bad" data-act="reset">Reset demo data</button>`) +
+    `<div class="card">${a.length ? `<div class="tablewrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Request</th></tr></thead><tbody>${a.map(x => `<tr><td style="white-space:nowrap">${fmtDT(x.t)}</td><td>${esc(x.by)}<div class="muted small">${ROLE_LABEL[x.role] || ''}</div></td><td>${esc(x.msg)}</td><td class="mono">${esc(x.ref)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Actions taken in this session will be listed here.</div>'}</div>`;
+}
+
+/* ============ request detail (staff) ============ */
+function openReq(id) { S.modal = id; S.att = {}; renderModal() }
+function closeReq() { S.modal = null; S.att = {}; $('#modal').innerHTML = '' }
+function renderModal() {
+  const box = $('#modal'); if (!S.modal || !S.user) { box.innerHTML = ''; return }
+  const r = byId(S.modal); if (!r) { box.innerHTML = ''; return }
+  const prev = $('.sheet', box)?.scrollTop || 0;
+  box.innerHTML = `<div class="overlay" data-act="closeov"><div class="sheet" role="dialog" aria-label="Request ${esc(r.id)}">${detail(r)}</div></div>`;
+  const sh = $('.sheet', box); if (sh && prev) sh.scrollTop = prev;
+}
+function idBlock(r) {
+  const slots = slotsFor(r.rtype).filter(s => r.att[s.k]);
+  return `<div class="card"><div class="row"><h2 class="sp">ID verification</h2>${r.idStatus === 'verified' ? '<span class="pill ok">Verified by GSO</span>' : r.idStatus === 'rejected' ? '<span class="pill bad">Rejected</span>' : '<span class="pill warn">Not yet checked</span>'}</div>
+  <dl class="kv"><dt>ID type</dt><dd>${esc(r.idType)}</dd><dt>ID number</dt><dd class="mono">${esc(r.idNumber)}</dd><dt>Expiry</dt><dd>${r.idExpiry ? fmtD(r.idExpiry) : 'No expiry date'}</dd>${r.idNote ? `<dt>Note</dt><dd>${esc(r.idNote)}</dd>` : ''}</dl>
+  <div class="slots" style="margin-top:12px">${slots.map(s => `<div class="slot done"><div class="t">${esc(s.label)}</div><img src="${r.att[s.k]}" alt="${esc(s.label)}" data-act="zoom" data-id="${esc(r.id)}" data-k="${s.k}"></div>`).join('')}</div></div>`;
+}
+function detail(r) {
+  const cf = conflicts(r); const slip = ['approved', 'released', 'returned'].includes(r.status);
+  let h = `<div class="hd"><div class="sp"><div class="mono muted">${esc(r.id)}</div><h2>${esc(r.eventName)}</h2></div>${pill(r.status)}${isOverdue(r) ? '<span class="pill bad">Overdue</span>' : ''}<button class="btn sm" data-act="close">Close</button></div>`;
+  h += `<div class="card"><dl class="kv"><dt>Borrower</dt><dd>${esc(r.name)}<div class="muted small">${esc(DB.rules[r.rtype]?.label || '')}${r.org ? ' · ' + esc(r.org) : ''}</div></dd>
+   <dt>Contact</dt><dd>${esc(r.contact)}</dd><dt>Venue</dt><dd>${esc(r.venue)}</dd><dt>Dates</dt><dd>${esc(rangeTxt(r))}</dd>
+   <dt>Event type</dt><dd>${esc(CAT[r.eventType][0])}</dd><dt>Submitted</dt><dd>${fmtDT(r.createdAt)}</dd></dl></div>`;
+  h += itemsBlock(r);
+  h += returnInspectionBlock(r);
+  if (openIssue(r) && roleIs('secretary', 'gso')) h += `<div class="notice bad">The borrower's account is on hold. Only the Admin can clear it after the borrower settles at the office.</div>`;
+  if (openIssue(r) && roleIs('admin')) h += `<div class="card fsec"><h2>Clear return issue</h2><p class="muted small" style="margin:0">Mark this resolved once the borrower has paid, replaced or settled it at the office. The borrower's account is then released.</p><label class="f">Resolution note <span class="hint">Optional</span><input id="rs_note" type="text"></label><div><button class="btn pri" data-act="resolveissue" data-id="${esc(r.id)}">Mark issue resolved</button></div></div>`;
+  if (cf.length) h += conflictBlock(cf);
+  h += idBlock(r) + actionsBlock(r);
+  if (slip) h += slipBlock(r);
+  if (r.remarks) h += `<div class="notice ${r.status === 'rejected' ? 'bad' : ''}"><b>Remarks:</b> ${esc(r.remarks)}</div>`;
+  h += `<div class="card"><h2>History</h2><ul class="tl">${r.log.map(l => `<li><div>${esc(l.msg)}<time>${esc(l.by)} · ${fmtDT(l.t)}</time></div></li>`).join('')}</ul></div>`;
+  return h;
+}
+function itemsBlock(r) {
+  const live = ['submitted', 'for_approval', 'id_issue'].includes(r.status); const reco = r.status === 'for_approval' && r.recoItems;
+  return `<div class="card"><h2>Items</h2><div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Requested</th>${reco ? '<th class="num">GSO recommends</th>' : ''}${r.approvedItems ? '<th class="num">Approved</th>' : ''}${live ? '<th class="num">Available</th>' : ''}${r.ret ? '<th class="num">Returned</th>' : ''}</tr></thead><tbody>${r.items.map(i => { const a = avail(i.id, r.start, r.end, r.id); return `<tr><td>${esc(inv(i.id).name)}</td><td class="num">${i.qty}</td>${reco ? `<td class="num">${recoQty(r, i.id)}</td>` : ''}${r.approvedItems ? `<td class="num">${qtyOf(r, i.id)}</td>` : ''}${live ? `<td class="num" style="${i.qty > a ? 'color:var(--bad);font-weight:600' : ''}">${a}</td>` : ''}${r.ret ? `<td class="num">${r.ret.qty?.[i.id] ?? ''}</td>` : ''}</tr>` }).join('')}</tbody></table></div></div>`;
+}
+
+function returnInspectionBlock(r) {
+  if (!r.ret) return '';
+
+  const items = r.approvedItems || r.items || [];
+  const hasShort = items.some(item => {
+    const expected = qtyOf(r, item.id);
+    const returned = Number(r.ret.qty?.[item.id] ?? expected);
+    return returned < expected;
+  });
+
+  let conditionLabel = 'Complete and in good condition';
+
+  if (r.ret.condition === 'damaged' && hasShort) {
+    conditionLabel = 'Damaged and short/missing items';
+  } else if (r.ret.condition === 'damaged') {
+    conditionLabel = 'Damaged';
+  } else if (hasShort || r.ret.condition === 'missing') {
+    conditionLabel = 'Short / missing items';
+  }
+
+  const hasIssue =
+    hasShort || r.ret.condition !== 'ok';
+
+  return `
+    <div class="card fsec">
+      <h2>Return Inspection Report</h2>
+
+      <div class="notice ${hasIssue ? 'bad' : 'ok'}">
+        <b>Return condition:</b>
+        ${esc(conditionLabel)}
+      </div>
+
+      ${r.ret.resolved ? `<div class="notice ok"><b>Resolved ${fmtD(iso(r.ret.resolved.at))}</b>${r.ret.resolved.note ? ': ' + esc(r.ret.resolved.note) : ''}</div>` : ''}
+
+      <dl class="kv">
+        <dt>Remarks</dt>
+        <dd>${esc(r.ret.remarks || 'No remarks provided.')}</dd>
+
+        <dt>Recorded by</dt>
+        <dd>${esc(r.ret.by || 'GSO staff')}</dd>
+
+        <dt>Date recorded</dt>
+        <dd>${fmtDT(r.ret.at)}</dd>
+      </dl>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Released</th>
+              <th>Returned</th>
+              <th>Short / Missing</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(item => {
+    const expected = qtyOf(r, item.id);
+    const returned = Number(
+      r.ret.qty?.[item.id] ?? expected
+    );
+    const missing = Math.max(0, expected - returned);
+
+    return `
+                <tr>
+                  <td>${esc(inv(item.id).name)}</td>
+                  <td>${expected}</td>
+                  <td>${returned}</td>
+                  <td>${missing}</td>
+                </tr>
+              `;
+  }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+
+function conflictBlock(cf) {
+  return `<div class="notice warn"><b>Date conflict.</b> More is wanted than GSO owns on these dates. Priority order: government activity, then community events, then private events, then who asked first.
+  ${cf.map(c => `<div style="margin-top:8px"><b>${esc(inv(c.id).name)}</b>: ${c.demand} wanted, ${c.total} owned. This request ranks #${c.rank} among waiting requests.
+   <ul class="reqlist small">${c.others.map(o => `<li><span class="mono">${esc(o.id)}</span> ${esc(o.name)}: ${qtyOf(o, c.id)} ${esc(inv(c.id).name.toLowerCase())}, ${esc(CAT[o.eventType][0])}, ${STATUS[o.status][0].toLowerCase()}</li>`).join('')}</ul></div>`).join('')}</div>`;
+}
+const HR = '<hr style="border:0;border-top:1px solid var(--line);width:100%">';
+function actionsBlock(r) {
+  let h = '';
+  if (can.review() && r.status === 'submitted') {
+    h += `<div class="card fsec"><h2>GSO review: ID and stock</h2><div class="checks" id="idchecks">
+     <label><input type="checkbox">Photo is clear and complete: all corners visible, details readable</label>
+     <label><input type="checkbox">Name on the ID matches the name on the request (${esc(r.name)})</label>
+     <label><input type="checkbox">ID type is on the accepted list and is not expired</label>
+     <label>
+  <input type="checkbox">
+  Supporting documents are attached and readable
+</label>
+     ${DB.settings.selfie ? '<label><input type="checkbox">Selfie matches the person on the ID</label>' : ''}</div>
+     <div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Requested</th><th class="num">Available</th><th class="num" style="width:120px">Recommend</th></tr></thead><tbody>${r.items.map(i => { const a = avail(i.id, r.start, r.end, r.id); return `<tr><td>${esc(inv(i.id).name)}</td><td class="num">${i.qty}</td><td class="num">${a}</td><td><input type="number" min="0" max="${a}" value="${Math.min(i.qty, a)}" data-reco="${i.id}" aria-label="Recommend ${esc(inv(i.id).name)}"></td></tr>` }).join('')}</tbody></table></div>
+     <div id="rverr"></div>
+     <div class="row"><button class="btn pri" data-act="review" data-id="${esc(r.id)}">ID verified. Forward to the Secretary</button></div>${HR}
+     <label class="f">Or reject the ID<select id="idrej">${ID_REJECT_REASONS.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
+     <label class="f">Note to the borrower <span class="hint">Optional</span><input type="text" id="idrejnote"></label>
+     <div><button class="btn bad" data-act="rejectid" data-id="${esc(r.id)}">Reject ID and ask for a new photo</button></div></div>`;
+  }
+  if (r.status === 'submitted' && !can.review()) h += `<div class="notice">Waiting for GSO to check the ID and stock. After that it comes to the Secretary for final approval.</div>`;
+  if (can.approve() && r.status === 'for_approval') {
+    h += `<div class="card fsec"><h2>Final approval</h2><p class="muted small" style="margin:0">GSO checked the ID and stock${r.reviewedBy ? ' (' + esc(r.reviewedBy) + ')' : ''}. Your approval makes this reservation official. Lower a quantity if needed.</p>
+     <div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Requested</th><th class="num">Available</th><th class="num" style="width:120px">Approve</th></tr></thead><tbody>${r.items.map(i => { const a = avail(i.id, r.start, r.end, r.id); return `<tr><td>${esc(inv(i.id).name)}</td><td class="num">${i.qty}</td><td class="num">${a}</td><td><input type="number" min="0" max="${a}" value="${Math.min(recoQty(r, i.id), a)}" data-appr="${i.id}" aria-label="Approve ${esc(inv(i.id).name)}"></td></tr>` }).join('')}</tbody></table></div>
+     <label class="f">Remarks <span class="hint">Optional</span><input id="ap_rem" type="text"></label><div id="aperr"></div>
+     <div class="row"><button class="btn pri" data-act="approve" data-id="${esc(r.id)}">Approve and sign</button></div>${HR}
+     <label class="f">Or deny<select id="dn_r">${DENY_REASONS.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
+     <label class="f">Remarks <span class="hint">Shown to the borrower</span><input id="dn_n" type="text"></label>
+     <div><button class="btn bad" data-act="deny" data-id="${esc(r.id)}">Deny request</button></div></div>`;
+  }
+  if (r.status === 'for_approval' && !can.approve()) h += `<div class="notice info">Waiting for the Private Secretary’s final approval.</div>`;
+  if (can.release() && r.status === 'approved') {
+    h += `<div class="card fsec" id="actpanel"><h2>Approve release</h2>
+     <div class="notice">Ask for the <b>original ${esc(r.idType)}</b> ending in <b class="mono">${esc(String(r.idNumber).slice(-4))}</b>. Name must read <b>${esc(r.name)}</b>.${r.start > todayISO() ? ` <b>Event starts ${fmtD(r.start)}.</b> Releasing early is allowed but check the schedule.` : ''}</div>
+     <div class="checks"><label><input type="checkbox" id="rl_id">The person receiving the items showed the original ID and it matches the verified ID</label></div>
+     <label class="f">Received by<input id="rl_by" type="text" value="${esc(r.name)}"></label>
+     <div id="rl_rep" class="checks" hidden><label><input type="checkbox" id="rl_auth">Representative: signed authorization letter and the representative’s own ID were checked</label></div>
+     <div id="rlerr"></div><div><button class="btn pri" data-act="release" data-id="${esc(r.id)}">Approve release</button></div></div>`;
+  }
+  if (can.release() && r.status === 'released') {
+    h += `<div class="card fsec" id="actpanel"><h2>Approve return</h2>${isOverdue(r) ? `<div class="notice bad">Due back ${fmtD(r.end)}. ${dayDiff(r.end, todayISO())} day(s) overdue.</div>` : `<p class="muted small" style="margin:0">Due back ${fmtD(r.end)}.</p>`}
+     <div class="tablewrap"><table><thead><tr><th>Item</th><th class="num">Released</th><th class="num" style="width:120px">Returned</th></tr></thead><tbody>${r.items.map(i => `<tr><td>${esc(inv(i.id).name)}</td><td class="num">${qtyOf(r, i.id)}</td><td><input type="number" min="0" max="${qtyOf(r, i.id)}" value="${qtyOf(r, i.id)}" data-ret="${i.id}" aria-label="Returned ${esc(inv(i.id).name)}"></td></tr>`).join('')}</tbody></table></div>
+     <div class="checks" id="rtchecks"><label><input type="checkbox">I counted every item against the quantities released</label><label><input type="checkbox">I checked the condition of the items</label></div>
+     <label class="f">Condition<select id="rt_c"><option value="ok">Complete and in good condition</option><option value="damaged">Damaged</option><option value="missing">Missing items</option></select></label>
+     <label class="f">Remarks<input id="rt_r" type="text" placeholder="Damage or missing items, if any"></label><div id="rterr"></div>
+     <div><button class="btn pri" data-act="return" data-id="${esc(r.id)}">Approve return</button></div><p class="small muted" style="margin:0">Approving closes the request and makes the stock available again.</p></div>`;
+  }
+  return h;
+}
+function slipBlock(r) {
+  return `<div class="slip"><h3>Borrower’s Slip</h3><p class="small" style="text-align:center;margin:2px 0 12px">Office of the Municipal Mayor · Inabanga, Bohol · No. ${esc(r.id)}</p>
+  <dl class="kv"><dt>Borrower</dt><dd>${esc(r.name)}${r.org ? ', ' + esc(r.org) : ''}</dd><dt>Event</dt><dd>${esc(r.eventName)}, ${esc(r.venue)}</dd><dt>Borrow dates</dt><dd>${esc(rangeTxt(r))}</dd><dt>Items</dt><dd>${esc(itemsTxt(r.approvedItems || r.items))}</dd><dt>Date returned</dt>
+<dd>${r.ret ? fmtD(iso(r.ret.at)) : '—'}</dd>
+
+<dt>Return approved by</dt>
+<dd>${r.ret ? esc(r.ret.by) : '—'}</dd>
+
+<dt>Return condition</dt>
+<dd>${r.ret ? esc(
+    r.ret.condition === 'damaged' ? 'Damaged' :
+      r.ret.condition === 'missing' ? 'Short / missing items' :
+        'Complete and in good condition'
+  ) : '—'}</dd>
+
+<dt>Remarks</dt>
+<dd>${esc(r.ret ? r.ret.remarks || '' : '') || '—'}</dd>
+  <div class="sig"><div>${r.release ? esc(r.release.by) : 'Released by (GSO)'}</div><div>${esc(r.approvedBy || '')}<br><span class="muted">Approved (final)</span></div><div>${r.release ? esc(r.release.receivedBy) : 'Received by (borrower)'}</div></div>
+  <p class="small muted" style="margin:10px 0 0">Borrower pays for damage caused by their fault, provides transport to the venue, and accounts for all items returned.</p></div>`;
+}
+
+/* ============ actions ============ */
+function after(msg) { saveDB(); render(); if (msg) toast(msg) }
+function showLb(src) { if (!src || !src.startsWith('data:image/')) return; $('#lb').innerHTML = `<div class="lb" data-act="lbclose"><img src="${src}" alt="Photo, enlarged"></div>` }
+function setCal(ds) { const d = new Date(ds + 'T00:00'); S.cal = { y: d.getFullYear(), m: d.getMonth(), sel: ds } }
+const ACT = {
+  showauth(el) { S.auth = el.dataset.m; S.view = 'auth'; render(); window.scrollTo(0, 0) },
+  bsignout() { S.bid = null; S.view = 'home'; S.trackId = null; S.done = null; try { sessionStorage.removeItem('gso_borrower') } catch (e) { } render(); toast('Signed out.') },
+  mineopen(el) { S.trackId = el.dataset.id; S.trackMiss = false; S.att = {}; render(); const t = $('#tres'); if (t) t.scrollIntoView({ block: 'start' }) },
+  askclear() { const b = me(); b.askedAt = Date.now(); audit(b.name + ' asked the Admin to review their account'); after('The Admin has been told. Please go to the GSO office.') },
+  openreq(el) { openReq(el.dataset.id) },
+  settle(el) {
+    const b = DB.borrowers.find(x => x.id === el.dataset.id); const note = ($(`[data-bn="${b.id}"]`).value || '').trim() || 'Settled at the office';
+    issuesOf(b).forEach(r => { r.ret.resolved = { at: Date.now(), by: S.user.name, note }; addLog(r, 'Return issue settled at the office. Account cleared by ' + S.user.name + ': ' + note) });
+    b.askedAt = null; audit('Cleared borrower account ' + b.name); after(b.name + ' can reserve again.')
+  },
+  nav(el) { go(el.dataset.v) },
+  stafflogin() { S.login = true; render() },
+  publicsite() { S.login = false; render() },
+  logout() { S.user = null; S.login = false; S.view = 'home'; S.modal = null; try { sessionStorage.removeItem('gso_user') } catch (e) { } render() },
+  open(el) { openReq(el.dataset.id) },
+  openact(el) { openReq(el.dataset.id); const a = $('#actpanel'); if (a) a.scrollIntoView({ block: 'start' }) },
+  resolveissue(el) { const r = byId(el.dataset.id); const note = $('#rs_note').value.trim(); r.ret.resolved = { at: Date.now(), by: S.user.name, note }; addLog(r, 'Return issue marked resolved by ' + S.user.name + (note ? ': ' + note : '')); after('Issue marked resolved.') },
+  close() { closeReq() },
+  closeov(el, ev) { if (ev.target === el) closeReq() },
+  zoom(el, ev) { ev.stopPropagation(); showLb(byId(el.dataset.id).att[el.dataset.k]) },
+  zoomnew(el, ev) { ev.stopPropagation(); showLb(S.att[el.dataset.k]) },
+  lbclose() { $('#lb').innerHTML = '' },
+  calnav(el) {
+    const d = +el.dataset.d; let { y, m } = S.cal;
+    if (d === 0) setCal(todayISO()); else { m += d; if (m < 0) { m = 11; y-- } if (m > 11) { m = 0; y++ } S.cal = { y, m, sel: `${y}-${pad(m + 1)}-01` } }
+    calRefresh();
+  },
+  calday(el) { S.cal.sel = el.dataset.d; calRefresh() },
+  reserveDate(el) { S.prefill = { s: el.dataset.d }; go('new') },
+  copytn() { const t = S.done; try { navigator.clipboard.writeText(t).then(() => toast('Tracking number copied.'), () => toast('Select the number and copy it.')) } catch (e) { toast('Select the number and copy it.') } },
+  trackthis() { S.trackId = S.done; S.trackMiss = false; S.view = 'mine'; S.done = null; render(); window.scrollTo(0, 0) },
+  newagain() { S.done = null; S.att = {}; render(); window.scrollTo(0, 0) },
+  tresubmit() {
+    const r = byId(S.trackId);
+    const err = $('#tverr');
+
+    if (!r) {
+      return err.innerHTML =
+        `<div class="errs">Request not found. Please check your tracking number.</div>`;
+    }
+
+    if (
+      !me() &&
+      (
+        last4($('#tv_m').value).length < 4 ||
+        last4($('#tv_m').value) !== last4(r.contact)
+      )
+    ) {
+      return err.innerHTML =
+        `<div class="errs">The last 4 digits do not match the mobile number on this request.</div>`;
+    }
+
+    const num = ($('#rs_num')?.value || '').trim();
+
+    // ID number is optional, but the new front photo is required.
+    if (!S.att.front) {
+      return err.innerHTML =
+        `<div class="errs">Upload a new front photo of the ID. The ID number is optional.</div>`;
+    }
+
+    const missing = slotsFor(r.rtype).filter(
+      s => s.req && !S.att[s.k] && !r.att[s.k]
+    );
+
+    if (missing.length) {
+      return err.innerHTML =
+        `<div class="errs">Missing: ${missing.map(s => esc(s.label)).join(', ')}.</div>`;
+    }
+
+    Object.assign(r.att, S.att);
+
+    // Update the ID number only if a new number was provided.
+    // If left blank, preserve the previously stored number.
+    if (num) {
+      r.idNumber = num;
+    }
+
+    r.idStatus = 'pending';
+    r.status = 'submitted';
+    r.idNote = '';
+
+    S.att = {};
+
+    addLog(r, 'New ID photo uploaded by the borrower');
+    saveDB();
+    refreshTrack();
+    toast('Sent for checking again.');
+  },
+  tcancel() {
+    const r = byId(S.trackId); const err = $('#tverr');
+    if (!me() && (last4($('#tv_m').value).length < 4 || last4($('#tv_m').value) !== last4(r.contact))) return err.innerHTML = `<div class="errs">Enter the last 4 digits of the mobile number on this request first.</div>`;
+    r.status = 'cancelled'; addLog(r, 'Request cancelled by the borrower'); saveDB(); refreshTrack(); toast('Request cancelled.');
+  },
+  review(el) {
+    const r = byId(el.dataset.id); const err = $('#rverr');
+    if (!$$('#idchecks input').every(b => b.checked)) return err.innerHTML = `<div class="errs">Tick every check before forwarding.</div>`;
+    const reco = []; let bad = '';
+    $$('[data-reco]').forEach(i => { const q = Math.floor(+i.value || 0); const a = avail(i.dataset.reco, r.start, r.end, r.id); if (q > a) bad = `${inv(i.dataset.reco).name}: only ${a} available.`; if (q > 0) reco.push({ id: i.dataset.reco, qty: q }) });
+    if (bad) return err.innerHTML = `<div class="errs">${esc(bad)}</div>`;
+    if (!reco.length) return err.innerHTML = `<div class="errs">Recommend at least one item, or reject the request’s ID.</div>`;
+    r.idStatus = 'verified'; r.status = 'for_approval'; r.idNote = ''; r.recoItems = reco; r.reviewedBy = S.user.name;
+    addLog(r, r.items.some(i => recoQty(r, i.id) < i.qty) ? 'ID verified, stock checked. Forwarded to the Secretary with reduced quantities' : 'ID verified and stock checked. Forwarded to the Secretary');
+    after('Forwarded to the Secretary for final approval.');
+  },
+  rejectid(el) {
+    const r = byId(el.dataset.id); const why = $('#idrej').value; const note = $('#idrejnote').value.trim();
+    r.idStatus = 'rejected'; r.status = 'id_issue'; r.idNote = why + (note ? '. ' + note : ''); addLog(r, 'ID rejected: ' + why); after('ID rejected. The borrower can upload a new photo with the tracking number.');
+  },
+  approve(el) {
+    const r = byId(el.dataset.id); const res = []; let bad = '';
+    $$('[data-appr]').forEach(i => { const q = Math.floor(+i.value || 0); const a = avail(i.dataset.appr, r.start, r.end, r.id); if (q > a) bad = `${inv(i.dataset.appr).name}: only ${a} available.`; res.push({ id: i.dataset.appr, qty: q }) });
+    if (bad) return ($('#aperr').innerHTML = `<div class="errs">${esc(bad)}</div>`);
+    const items = res.filter(x => x.qty > 0); if (!items.length) return ($('#aperr').innerHTML = `<div class="errs">Approve at least one item, or deny the request.</div>`);
+    r.approvedItems = items; r.status = 'approved'; r.approvedBy = S.user.name; r.approvedAt = Date.now(); r.remarks = $('#ap_rem').value.trim();
+    addLog(r, r.items.some(i => qtyOf(r, i.id) < i.qty) ? 'Approved with reduced quantities. Reservation is official' : 'Approved. Reservation is official'); after('Approved. The reservation is now official.');
+  },
+  deny(el) { const r = byId(el.dataset.id); const why = $('#dn_r').value; const n = $('#dn_n').value.trim(); r.status = 'rejected'; r.remarks = why + (n ? '. ' + n : ''); addLog(r, 'Request denied: ' + why); after('Request denied.') },
+  release(el) {
+    const r = byId(el.dataset.id); const by = $('#rl_by').value.trim(); const rep = by.toLowerCase() !== r.name.toLowerCase();
+    if (!$('#rl_id').checked) return ($('#rlerr').innerHTML = `<div class="errs">Confirm that the original ID was shown and matches.</div>`);
+    if (by.length < 3) return ($('#rlerr').innerHTML = `<div class="errs">Enter the name of the person receiving the items.</div>`);
+    if (rep && !$('#rl_auth').checked) return ($('#rlerr').innerHTML = `<div class="errs">A representative needs a signed authorization letter and their own ID checked.</div>`);
+    r.status = 'released'; r.release = { at: Date.now(), by: S.user.name, receivedBy: by, idChecked: true }; addLog(r, `Items released to ${by}${rep ? ' (representative)' : ''}; original ID checked`); after('Items released.');
+  },
+  return(el) {
+    const r = byId(el.dataset.id);
+    const q = {};
+
+    $$('[data-ret]').forEach(i => {
+      q[i.dataset.ret] = Math.floor(+i.value || 0);
+    });
+
+    if (!$$('#rtchecks input').every(b => b.checked)) {
+      return $('#rterr').innerHTML =
+        `<div class="errs">Tick both checks before approving the return.</div>`;
+    }
+
+    const short = Object.keys(q).some(
+      k => q[k] < qtyOf(r, k)
+    );
+
+    const cond = $('#rt_c').value;
+    const rem = $('#rt_r').value.trim();
+
+    if ((short || cond !== 'ok') && !rem) {
+      return $('#rterr').innerHTML =
+        `<div class="errs">Add remarks about the missing or damaged items.</div>`;
+    }
+
+    const finalCondition =
+      short && cond === 'ok' ? 'missing' : cond;
+
+    r.status = 'returned';
+
+    r.ret = {
+      at: Date.now(),
+      by: S.user.name,
+      condition: finalCondition,
+      remarks: rem,
+      qty: q
+    };
+
+    const hasIssue = short || finalCondition !== 'ok';
+
+    addLog(
+      r,
+      hasIssue
+        ? 'Return inspection recorded: ' +
+        (short ? 'short or missing items. ' : '') +
+        (finalCondition === 'damaged' ? 'damaged items. ' : '') +
+        'Remarks: ' + rem
+        : 'Return approved by GSO: items complete and in good condition'
+    );
+
+    after(
+      hasIssue
+        ? 'Return recorded with issues. The inspection report is visible to staff and the borrower.'
+        : 'Return approved. All items were returned in good condition.'
+    );
+  },
+  savestock() {
+    $$('[data-stock]').forEach(i => { const it = inv(i.dataset.stock); it.total = Math.max(0, Math.floor(+i.value || 0)) });
+    $$('[data-iname]').forEach(i => { if (i.value.trim()) inv(i.dataset.iname).name = i.value.trim() });
+    $$('[data-iunit]').forEach(i => { inv(i.dataset.iunit).unit = i.value.trim() || 'pcs' });
+    audit('Inventory updated'); saveDB(); render(); toast('Inventory saved.');
+  },
+  delitem(el) {
+    const id = el.dataset.id;
+    if (DB.requests.some(r => r.items.some(i => i.id === id))) return toast('This item is on existing requests. Set its stock to 0 instead.');
+    DB.inventory = DB.inventory.filter(i => i.id !== id); audit('Removed an inventory item'); after('Item removed.');
+  },
+  setpw(el) { const i = $(`[data-pw="${el.dataset.id}"]`); if (i.value.length < 6) return toast('Use at least 6 characters.'); DB.users.find(u => u.id === el.dataset.id).pw = i.value; audit('Changed a staff password'); saveDB(); i.value = ''; toast('Password updated.') },
+  togu(el) { const u = DB.users.find(x => x.id === el.dataset.id); u.active = !u.active; audit(`${u.active ? 'Enabled' : 'Disabled'} account ${u.username}`); after() },
+  saverules() {
+    DB.settings.selfie = $('#ru_selfie').checked; DB.settings.advanceDays = Math.max(0, +$('#ru_adv').value || 0);
+    $$('[data-rule]').forEach(t => { const lines = t.value.split('\n').map(x => x.trim()).filter(Boolean); if (t.dataset.f === 'ids' && !lines.length) return; DB.rules[t.dataset.rule][t.dataset.f] = lines });
+    audit('ID requirements updated'); saveDB(); render(); toast('Requirements saved. New requests use them right away.');
+  },
+  reset() { if (ACT._arm) { DB = seed(); S.user = null; S.login = false; S.view = 'home'; try { sessionStorage.clear() } catch (e) { } saveDB(); render(); toast('Demo data restored.'); ACT._arm = false } else { ACT._arm = true; toast('Tap “Reset demo data” again to erase everything.'); setTimeout(() => ACT._arm = false, 4000) } }
+};
+
+/* ============ events ============ */
+document.addEventListener('click', ev => {
+  const el = ev.target.closest('[data-act]'); if (!el) return;
+  const f = ACT[el.dataset.act]; if (f) f(el, ev);
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') { if ($('#lb').innerHTML) return ACT.lbclose(); if (S.modal) closeReq() }
+  if (ev.key === 'Enter' && ev.target.matches('tr.click')) ev.target.click();
+});
+document.addEventListener('change', ev => {
+  const t = ev.target;
+  if (t.matches('input[type=file][data-slot]')) return onFile(t);
+  if (t.name === 'rtype') { S.newType = t.value; S.att = {}; $('#idsec').innerHTML = idSection(S.newType); syncOrg(); refreshAvail() }
+  if (t.id === 'n_start') { const e = $('#n_end'); if (e.value < t.value) e.value = t.value; e.min = t.value; refreshAvail() }
+  if (t.id === 'n_end') refreshAvail();
+  if (t.id === 'fs') { S.filter.status = t.value; $('#listwrap').innerHTML = reqTable(applyFilter(DB.requests)) }
+  if (t.id === 'av_s' || t.id === 'av_e') { const s = $('#av_s').value, e = $('#av_e').value; if (s && e && e >= s) { S.availDate = { s, e }; render() } }
+  if (t.id === 'rl_by') { const r = byId(S.modal); $('#rl_rep').hidden = t.value.trim().toLowerCase() === r.name.toLowerCase() }
+});
+document.addEventListener('input', ev => {
+  const t = ev.target;
+  if (t.dataset?.item) refreshAvail();
+  if (t.id === 'fq') { S.filter.q = t.value; $('#listwrap').innerHTML = reqTable(applyFilter(DB.requests)) }
+  if (t.id === 'rl_by') { const r = byId(S.modal); $('#rl_rep').hidden = t.value.trim().toLowerCase() === r.name.toLowerCase() }
+});
+document.addEventListener('submit', ev => {
+  ev.preventDefault(); const f = ev.target.id;
+  if (f === 'fLogin') {
+    const u = DB.users.find(x => x.username === $('#lu').value.trim().toLowerCase() && x.pw === $('#lp').value);
+    if (!u) return $('#lerr').textContent = 'Username or password is incorrect.';
+    if (!u.active) return $('#lerr').textContent = 'This account is disabled. Contact the Admin.';
+    S.user = u; S.login = false; S.view = 'dash'; try { sessionStorage.setItem('gso_user', u.id) } catch (e) { } audit('Signed in'); saveDB(); render();
+  }
+
+
+  if (f === 'fTrack') {
+    const tracking = $('#tq').value.trim();
+    const fullName = $('#trackName').value.trim();
+
+    if (!tracking || !fullName) {
+      return;
+    }
+
+    doTrack(tracking, fullName);
+
+    if (S.view !== 'track') {
+      go('track');
+    } else {
+      $('#tres').innerHTML = trackResult();
+    }
+  }
+
+
+  if (f === 'fBLogin') {
+    const u = DB.borrowers.find(x => x.username === $('#bl_u').value.trim().toLowerCase() && x.pw === $('#bl_p').value);
+    if (!u) return $('#blerr').textContent = 'Username or password is incorrect.';
+    if (!u.active) return $('#blerr').textContent = 'This account is disabled. Contact the GSO office.';
+    S.bid = u.id; S.newType = u.rtype; try { sessionStorage.setItem('gso_borrower', u.id) } catch (e) { } S.view = 'mine'; S.trackId = null; render(); window.scrollTo(0, 0);
+  }
+  if (f === 'fBReg') {
+    const g = i => $(i).value.trim(); const e = []; const n = g('#br_n'), c = g('#br_c'), t = $('#br_t').value, o = g('#br_o'), a = g('#br_a'), un = g('#br_u').toLowerCase(), pw = $('#br_p').value;
+    if (n.split(/\s+/).length < 2) e.push('Enter your full name, first and last.');
+    if (!/^[0-9+\s-]{7,}$/.test(c) || last4(c).length < 4) e.push('Enter a valid mobile number.');
+    if (t !== 'citizen' && !o) e.push('Enter your office or organization.');
+    if (un.length < 3 || /\s/.test(un)) e.push('Username needs at least 3 characters and no spaces.');
+    else if (DB.borrowers.some(x => x.username === un) || DB.users.some(x => x.username === un)) e.push('That username is taken.');
+    if (pw.length < 6) e.push('Password needs at least 6 characters.');
+    if (e.length) return $('#brerr').innerHTML = `<div class="errs" role="alert"><ul>${e.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
+    const b = { id: 'b_' + uid(), name: n, username: un, pw, contact: c, rtype: t, org: o, address: a, createdAt: Date.now(), active: true };
+    DB.borrowers.push(b); audit('New borrower account ' + un); saveDB(); S.bid = b.id; S.newType = t; try { sessionStorage.setItem('gso_borrower', b.id) } catch (e) { } S.view = 'new'; render(); toast('Account created. You are signed in.'); window.scrollTo(0, 0);
+  }
+  if (f === 'fNew') submitNew();
+  if (f === 'fItem') {
+    const n = $('#ai_n').value.trim(); if (!n) return;
+    DB.inventory.push({ id: 'i_' + uid(), name: n, unit: $('#ai_u').value.trim() || 'pcs', total: Math.max(0, Math.floor(+$('#ai_t').value || 0)) });
+    audit('Added inventory item ' + n); after('Item added.');
+  }
+  if (f === 'fUser') {
+    const un = $('#au_u').value.trim().toLowerCase();
+    if (DB.users.some(x => x.username === un)) return $('#auerr').textContent = 'That username is taken.';
+    DB.users.push({ id: 'u_' + uid(), name: $('#au_n').value.trim(), username: un, pw: $('#au_p').value, role: $('#au_r').value, active: true });
+    audit('Added staff account ' + un); after('Account added.');
+  }
+});
+render();

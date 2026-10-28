@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>GSO Logistics Reservation & Tracking System</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Mono:wght@500&family=Public+Sans:wght@400;500;600&display=swap">
+    <link rel="stylesheet" href="styles.css?v=7">
+
+</head>
+
+<body>
+    <div id="app"></div>
+    <div id="modal"></div>
+    <div id="lb"></div>
+    <div id="toast"></div>
+
+    <script src="app.js?v=7"></script>
+
+</body>
+
+</html>
